@@ -1,0 +1,33 @@
+{
+  "name": "tasklane",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP-native kanban board for tasks — Sidebar UI → MCP Contract → Board Core",
+  "packageManager": "pnpm@11.20.0",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "pnpm build && node --test packages/core/dist/test/*.test.js mcp/dist/test/*.test.js",
+    "smoke": "node scripts/smoke.mjs",
+    "verify:git": "node scripts/git-verify.mjs",
+    "build:ui": "pnpm --filter @tasklane/ui build",
+    "sidebar": "pnpm --filter @tasklane/ui build && node packages/bridge/bridge.mjs",
+    "mcp": "node mcp/dist/src/index.js",
+    "verify:bridge": "node scripts/bridge-verify.mjs",
+    "verify:twoproc": "node scripts/two-process-verify.mjs",
+    "build:plugin": "pnpm build && node scripts/build-plugin.mjs",
+    "verify:plugin": "node scripts/verify-plugin.mjs"
+  },
+  "devDependencies": {
+    "@tasklane/core": "workspace:*",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "ws": "^8.18.0"
+  }
+}

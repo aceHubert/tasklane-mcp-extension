@@ -1,0 +1,158 @@
+{
+  "input": {
+    "version": 4,
+    "boards": [
+      {
+        "id": "default",
+        "name": "冷存储验收",
+        "repo": "/repos/cold",
+        "baseBranch": "main",
+        "createdAt": "2026-01-01T00:00:00.000Z"
+      }
+    ],
+    "tasks": {
+      "TASK-1": {
+        "id": "TASK-1",
+        "boardId": "default",
+        "title": "活跃任务",
+        "status": "doing",
+        "priority": "P2",
+        "assignee": "human",
+        "execution": {
+          "state": "idle",
+          "updatedAt": "2026-09-20T10:00:00.000Z"
+        },
+        "createdAt": "2026-09-20T10:00:00.000Z",
+        "updatedAt": "2026-09-20T10:00:00.000Z",
+        "description": "第一行\n第二行"
+      },
+      "TASK-2": {
+        "id": "TASK-2",
+        "boardId": "default",
+        "title": "归档任务",
+        "status": "done",
+        "priority": "P2",
+        "assignee": "human",
+        "execution": {
+          "state": "idle",
+          "updatedAt": "2026-09-20T10:00:00.000Z"
+        },
+        "createdAt": "2026-09-20T10:00:00.000Z",
+        "updatedAt": "2026-09-20T10:00:00.000Z",
+        "archivedAt": "2026-09-20T10:00:00.000Z",
+        "description": "第一行\n第二行"
+      },
+      "TASK-3": {
+        "id": "TASK-3",
+        "boardId": "default",
+        "title": "区间外",
+        "status": "done",
+        "priority": "P2",
+        "assignee": "human",
+        "execution": {
+          "state": "idle",
+          "updatedAt": "2026-09-20T10:00:00.000Z"
+        },
+        "createdAt": "2026-01-01T00:00:00.000Z",
+        "updatedAt": "2026-01-01T00:00:00.000Z",
+        "description": "第一行\n第二行"
+      }
+    },
+    "sessions": {
+      "TASK-2": {
+        "taskId": "TASK-2",
+        "events": [
+          {
+            "kind": "archived",
+            "at": "2026-09-20T10:00:00.000Z",
+            "detail": "历史归档"
+          }
+        ]
+      }
+    },
+    "seq": 100
+  },
+  "outputs": {
+    "all": {
+      "boardId": "default",
+      "boardName": "冷存储验收",
+      "bytes": 1189,
+      "range": {
+        "start": "2026-09-01T00:00:00.000Z",
+        "end": "2026-10-04T23:59:59.999Z",
+        "startDate": "2026-09-01",
+        "endDate": "2026-10-04",
+        "timezone": "UTC+00:00"
+      },
+      "scope": "all",
+      "stats": {
+        "total": 2,
+        "byStatus": {
+          "backlog": 0,
+          "ready": 0,
+          "doing": 1,
+          "review": 0,
+          "done": 1
+        },
+        "archived": 1,
+        "human": 2,
+        "agent": 0
+      },
+      "markdown": "# TaskLane 任务导出 · 冷存储验收\n\n- 看板：`冷存储验收`（`default`）\n- 仓库：`/repos/cold`\n- 区间：2026-09-01 00:00 — 2026-10-04 23:59（UTC+00:00，含边界）\n- 范围：全部任务（含归档）\n- 生成时间：2026-10-04 12:00\n- 命中口径：创建、更新或归档时间落在区间内\n\n## 概览\n\n| 指标 | 数量 |\n| --- | --- |\n| 任务总数 | 2 |\n| 待办（backlog） | 0 |\n| 就绪（ready） | 0 |\n| 执行中（doing） | 1 |\n| 待审查（review） | 0 |\n| 已完成（done） | 1 |\n| 其中已归档 | 1 |\n| 指派 Human / Agent | 2 / 0 |\n\n## 任务明细\n\n### 执行中（doing） · 1\n\n#### `TASK-1` 活跃任务\n\n- 状态：执行中（doing） · 优先级：P2 · 负责人：human\n- 创建：2026-09-20 10:00 · 更新：2026-09-20 10:00\n- 区间命中：创建、更新\n- 执行：idle\n\n描述：\n\n> 第一行\n> 第二行\n\n### 已完成（done） · 1\n\n#### `TASK-2` 归档任务\n\n- 状态：已完成（done） · 优先级：P2 · 负责人：human\n- 创建：2026-09-20 10:00 · 更新：2026-09-20 10:00 · 归档：2026-09-20 10:00\n- 区间命中：创建、更新、归档\n- 执行：idle\n\n描述：\n\n> 第一行\n> 第二行\n"
+    },
+    "active": {
+      "boardId": "default",
+      "boardName": "冷存储验收",
+      "bytes": 871,
+      "range": {
+        "start": "2026-09-01T00:00:00.000Z",
+        "end": "2026-10-04T23:59:59.999Z",
+        "startDate": "2026-09-01",
+        "endDate": "2026-10-04",
+        "timezone": "UTC+00:00"
+      },
+      "scope": "active",
+      "stats": {
+        "total": 1,
+        "byStatus": {
+          "backlog": 0,
+          "ready": 0,
+          "doing": 1,
+          "review": 0,
+          "done": 0
+        },
+        "archived": 0,
+        "human": 1,
+        "agent": 0
+      },
+      "markdown": "# TaskLane 任务导出 · 冷存储验收\n\n- 看板：`冷存储验收`（`default`）\n- 仓库：`/repos/cold`\n- 区间：2026-09-01 00:00 — 2026-10-04 23:59（UTC+00:00，含边界）\n- 范围：仅未归档任务\n- 生成时间：2026-10-04 12:00\n- 命中口径：创建、更新或归档时间落在区间内\n\n## 概览\n\n| 指标 | 数量 |\n| --- | --- |\n| 任务总数 | 1 |\n| 待办（backlog） | 0 |\n| 就绪（ready） | 0 |\n| 执行中（doing） | 1 |\n| 待审查（review） | 0 |\n| 已完成（done） | 0 |\n| 其中已归档 | 0 |\n| 指派 Human / Agent | 1 / 0 |\n\n## 任务明细\n\n### 执行中（doing） · 1\n\n#### `TASK-1` 活跃任务\n\n- 状态：执行中（doing） · 优先级：P2 · 负责人：human\n- 创建：2026-09-20 10:00 · 更新：2026-09-20 10:00\n- 区间命中：创建、更新\n- 执行：idle\n\n描述：\n\n> 第一行\n> 第二行\n"
+    },
+    "archived": {
+      "boardId": "default",
+      "boardName": "冷存储验收",
+      "bytes": 907,
+      "range": {
+        "start": "2026-09-01T00:00:00.000Z",
+        "end": "2026-10-04T23:59:59.999Z",
+        "startDate": "2026-09-01",
+        "endDate": "2026-10-04",
+        "timezone": "UTC+00:00"
+      },
+      "scope": "archived",
+      "stats": {
+        "total": 1,
+        "byStatus": {
+          "backlog": 0,
+          "ready": 0,
+          "doing": 0,
+          "review": 0,
+          "done": 1
+        },
+        "archived": 1,
+        "human": 1,
+        "agent": 0
+      },
+      "markdown": "# TaskLane 任务导出 · 冷存储验收\n\n- 看板：`冷存储验收`（`default`）\n- 仓库：`/repos/cold`\n- 区间：2026-09-01 00:00 — 2026-10-04 23:59（UTC+00:00，含边界）\n- 范围：仅已归档任务\n- 生成时间：2026-10-04 12:00\n- 命中口径：创建、更新或归档时间落在区间内\n\n## 概览\n\n| 指标 | 数量 |\n| --- | --- |\n| 任务总数 | 1 |\n| 待办（backlog） | 0 |\n| 就绪（ready） | 0 |\n| 执行中（doing） | 0 |\n| 待审查（review） | 0 |\n| 已完成（done） | 1 |\n| 其中已归档 | 1 |\n| 指派 Human / Agent | 1 / 0 |\n\n## 任务明细\n\n### 已完成（done） · 1\n\n#### `TASK-2` 归档任务\n\n- 状态：已完成（done） · 优先级：P2 · 负责人：human\n- 创建：2026-09-20 10:00 · 更新：2026-09-20 10:00 · 归档：2026-09-20 10:00\n- 区间命中：创建、更新、归档\n- 执行：idle\n\n描述：\n\n> 第一行\n> 第二行\n"
+    }
+  }
+}

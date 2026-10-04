@@ -1,0 +1,498 @@
+{
+  "schema": {
+    "schemaVersion": 2,
+    "sequences": {
+      "com.tldraw.store": 5,
+      "com.tldraw.asset": 1,
+      "com.tldraw.camera": 1,
+      "com.tldraw.document": 2,
+      "com.tldraw.instance": 26,
+      "com.tldraw.instance_page_state": 5,
+      "com.tldraw.page": 1,
+      "com.tldraw.instance_presence": 6,
+      "com.tldraw.pointer": 1,
+      "com.tldraw.shape": 4,
+      "com.tldraw.user": 1,
+      "com.tldraw.asset.image": 6,
+      "com.tldraw.asset.video": 5,
+      "com.tldraw.asset.bookmark": 2,
+      "com.tldraw.shape.arrow": 8,
+      "com.tldraw.shape.bookmark": 2,
+      "com.tldraw.shape.draw": 4,
+      "com.tldraw.shape.embed": 4,
+      "com.tldraw.shape.frame": 1,
+      "com.tldraw.shape.geo": 11,
+      "com.tldraw.shape.group": 0,
+      "com.tldraw.shape.highlight": 3,
+      "com.tldraw.shape.image": 5,
+      "com.tldraw.shape.line": 5,
+      "com.tldraw.shape.note": 12,
+      "com.tldraw.shape.text": 4,
+      "com.tldraw.shape.video": 4,
+      "com.tldraw.binding.arrow": 1
+    }
+  },
+  "store": {
+    "user:ll7p7M-bA-ABqWPUVe7-f": {
+      "name": "",
+      "color": "#EC5E41",
+      "imageUrl": "",
+      "meta": {},
+      "id": "user:ll7p7M-bA-ABqWPUVe7-f",
+      "typeName": "user"
+    },
+    "document:document": {
+      "gridSize": 10,
+      "name": "",
+      "meta": {},
+      "id": "document:document",
+      "typeName": "document"
+    },
+    "page:liquid-glass-logo-pure-black-20261003": {
+      "meta": {},
+      "id": "page:liquid-glass-logo-pure-black-20261003",
+      "name": "liquid-glass-logo-pure-black",
+      "index": "a5",
+      "typeName": "page"
+    },
+    "asset:liquid-glass-logo-pure-black": {
+      "id": "asset:liquid-glass-logo-pure-black",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black.png",
+        "w": 1254,
+        "h": 1254,
+        "fileSize": 1246888,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black": {
+      "x": 0,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 1254
+      },
+      "id": "shape:liquid-glass-logo-pure-black",
+      "type": "image",
+      "props": {
+        "w": 256,
+        "h": 256,
+        "assetId": "asset:liquid-glass-logo-pure-black",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 1254×1254"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a0",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-1024": {
+      "id": "asset:liquid-glass-logo-pure-black-1024",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-1024.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-1024.png",
+        "w": 1024,
+        "h": 1024,
+        "fileSize": 1053740,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-1024": {
+      "x": 288,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 1024,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-1024",
+      "type": "image",
+      "props": {
+        "w": 256,
+        "h": 256,
+        "assetId": "asset:liquid-glass-logo-pure-black-1024",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 1024×1024"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a1",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-512": {
+      "id": "asset:liquid-glass-logo-pure-black-512",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-512.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-512.png",
+        "w": 512,
+        "h": 512,
+        "fileSize": 281926,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-512": {
+      "x": 576,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 512,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black-1024"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-512",
+      "type": "image",
+      "props": {
+        "w": 256,
+        "h": 256,
+        "assetId": "asset:liquid-glass-logo-pure-black-512",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 512×512"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a2",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-256": {
+      "id": "asset:liquid-glass-logo-pure-black-256",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-256.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-256.png",
+        "w": 256,
+        "h": 256,
+        "fileSize": 77848,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-256": {
+      "x": 864,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 256,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black-512"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-256",
+      "type": "image",
+      "props": {
+        "w": 256,
+        "h": 256,
+        "assetId": "asset:liquid-glass-logo-pure-black-256",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 256×256"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a3",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-180": {
+      "id": "asset:liquid-glass-logo-pure-black-180",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-180.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-180.png",
+        "w": 180,
+        "h": 180,
+        "fileSize": 41774,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-180": {
+      "x": 1152,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 180,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black-256"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-180",
+      "type": "image",
+      "props": {
+        "w": 180,
+        "h": 180,
+        "assetId": "asset:liquid-glass-logo-pure-black-180",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 180×180"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a4",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-128": {
+      "id": "asset:liquid-glass-logo-pure-black-128",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-128.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-128.png",
+        "w": 128,
+        "h": 128,
+        "fileSize": 23030,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-128": {
+      "x": 1364,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 128,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black-180"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-128",
+      "type": "image",
+      "props": {
+        "w": 128,
+        "h": 128,
+        "assetId": "asset:liquid-glass-logo-pure-black-128",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 128×128"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a5",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-64": {
+      "id": "asset:liquid-glass-logo-pure-black-64",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-64.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-64.png",
+        "w": 64,
+        "h": 64,
+        "fileSize": 7278,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-64": {
+      "x": 1524,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 64,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black-128"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-64",
+      "type": "image",
+      "props": {
+        "w": 64,
+        "h": 64,
+        "assetId": "asset:liquid-glass-logo-pure-black-64",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 64×64"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a6",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-48": {
+      "id": "asset:liquid-glass-logo-pure-black-48",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-48.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-48.png",
+        "w": 48,
+        "h": 48,
+        "fileSize": 4589,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-48": {
+      "x": 1620,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 48,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black-64"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-48",
+      "type": "image",
+      "props": {
+        "w": 48,
+        "h": 48,
+        "assetId": "asset:liquid-glass-logo-pure-black-48",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 48×48"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a7",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-32": {
+      "id": "asset:liquid-glass-logo-pure-black-32",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-32.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-32.png",
+        "w": 32,
+        "h": 32,
+        "fileSize": 2374,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-32": {
+      "x": 1700,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 32,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black-48"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-32",
+      "type": "image",
+      "props": {
+        "w": 32,
+        "h": 32,
+        "assetId": "asset:liquid-glass-logo-pure-black-32",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 32×32"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a8",
+      "typeName": "shape"
+    },
+    "asset:liquid-glass-logo-pure-black-16": {
+      "id": "asset:liquid-glass-logo-pure-black-16",
+      "typeName": "asset",
+      "type": "image",
+      "props": {
+        "name": "liquid-glass-logo-pure-black-16.png",
+        "src": "/page-assets/liquid-glass-logo-pure-black-20261003/liquid-glass-logo-pure-black-16.png",
+        "w": 16,
+        "h": 16,
+        "fileSize": 885,
+        "mimeType": "image/png",
+        "isAnimated": false
+      },
+      "meta": {}
+    },
+    "shape:liquid-glass-logo-pure-black-16": {
+      "x": 1764,
+      "y": 0,
+      "rotation": 0,
+      "isLocked": false,
+      "opacity": 1,
+      "meta": {
+        "cowartGeneratedStandalone": true,
+        "logoName": "liquid-glass-logo-pure-black",
+        "exportSize": 16,
+        "cowartAnnotationSourceShapeId": "shape:liquid-glass-logo-pure-black-32"
+      },
+      "id": "shape:liquid-glass-logo-pure-black-16",
+      "type": "image",
+      "props": {
+        "w": 16,
+        "h": 16,
+        "assetId": "asset:liquid-glass-logo-pure-black-16",
+        "playing": true,
+        "url": "",
+        "crop": null,
+        "flipX": false,
+        "flipY": false,
+        "altText": "liquid-glass-logo-pure-black · 16×16"
+      },
+      "parentId": "page:liquid-glass-logo-pure-black-20261003",
+      "index": "a9",
+      "typeName": "shape"
+    }
+  }
+}

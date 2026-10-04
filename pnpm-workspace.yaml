@@ -1,0 +1,7 @@
+packages:
+  - packages/core
+  - packages/bridge
+  - mcp
+  - ui
+allowBuilds:
+  esbuild: true

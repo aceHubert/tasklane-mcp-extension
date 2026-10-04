@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "source": "cowart",
+  "pages": [
+    {
+      "id": "page:page",
+      "name": "Page 1",
+      "index": "a1",
+      "path": "pages/page/cowart-canvas.json"
+    },
+    {
+      "id": "page:KjlNV1c5wW_75c9l57IRR",
+      "name": "Kanban 插件 Logo",
+      "index": "a2bCSyYV",
+      "path": "pages/KjlNV1c5wW_75c9l57IRR/cowart-canvas.json"
+    },
+    {
+      "id": "page:liquid-glass-logo-20261003",
+      "name": "liquid-glass-logo",
+      "index": "a3",
+      "path": "pages/liquid-glass-logo-20261003/cowart-canvas.json"
+    },
+    {
+      "id": "page:liquid-glass-logo-white-20261003",
+      "name": "liquid-glass-logo-white",
+      "index": "a4",
+      "path": "pages/liquid-glass-logo-white-20261003/cowart-canvas.json"
+    },
+    {
+      "id": "page:liquid-glass-logo-pure-black-20261003",
+      "name": "liquid-glass-logo-pure-black",
+      "index": "a5",
+      "path": "pages/liquid-glass-logo-pure-black-20261003/cowart-canvas.json"
+    }
+  ]
+}

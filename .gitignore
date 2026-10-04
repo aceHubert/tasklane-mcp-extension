@@ -1,0 +1,22 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.worktrees/
+*.tmp
+.local/
+.local-qa/
+extension/dist/
+extension/tools/node_modules/
+
+# tsc 增量构建信息（正常落在各 dist 内，防御根目录产生）
+*.tsbuildinfo
+
+# 已迁移 pnpm workspace：根目录残留的 npm 锁文件不再维护（extension/tools 的 npm 锁要提交）
+/package-lock.json
+
+# 本地验收/调试残留
+nohup.out
+
+# 注意：plugins/tasklane/（构建产物）与各源码目录【不忽略】——
+# GitHub marketplace 安装只 clone 不构建，插件必须随仓库自带构建产物

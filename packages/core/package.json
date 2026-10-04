@@ -1,0 +1,17 @@
+{
+  "name": "@tasklane/core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Board Core — task lifecycle, store, git worktree binding and session timeline. Independently testable, no MCP dependency.",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  }
+}

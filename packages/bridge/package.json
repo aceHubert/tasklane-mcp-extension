@@ -1,0 +1,10 @@
+{
+  "name": "@tasklane/bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Thin bridge: MCP server (stdio) ↔ WebSocket + static UI host. 独立开发/演示用；宿主嵌入时由宿主的 MCP Apps bridge 取代。",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

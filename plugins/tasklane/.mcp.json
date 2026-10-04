@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "tasklane": {
+      "title": "TaskLane Board",
+      "description": "Task board shared by the user and the agent (7 board/task tools + sidebar widget). Board data lives in TASKLANE_HOME (default ~/.tasklane).",
+      "command": "node",
+      "args": ["./server.mjs"],
+      "cwd": ".",
+      "env": {
+        "TASKLANE_BASE_BRANCH": "main"
+      }
+    }
+  }
+}

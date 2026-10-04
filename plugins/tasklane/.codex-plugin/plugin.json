@@ -1,0 +1,37 @@
+{
+  "name": "tasklane",
+  "version": "0.3.14",
+  "description": "MCP-native task board for coding agent workflows. Open the native TaskLane panel through MCP from a project conversation or global navigation.",
+  "author": {
+    "name": "aceHubert"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "TaskLane",
+    "shortDescription": "Task board shared by you and the agent",
+    "longDescription": "TaskLane shares board management and correlated Codex native execution requests, real chat bindings and receipts. Connected Codex panels submit explicit tasks directly; native tools are checked within each task and ready chat identifiers are bound before execution.",
+    "developerName": "aceHubert",
+    "category": "Productivity",
+    "brandColor": "#2F6FED",
+    "logo": "./assets/logo-256.png",
+    "composerIcon": "./assets/logo-32.png",
+    "capabilities": [
+      "Sidebar entrypoint",
+      "Project conversation entrypoint",
+      "Native fullscreen kanban panel",
+      "Shared human/agent task board",
+      "Verified native chat and workspace binding",
+      "Receipt-driven execution timeline"
+    ],
+    "defaultPrompt": [
+      "Open the TaskLane native panel for this project through MCP.",
+      "Open the global TaskLane board through MCP.",
+      "Create a task for adding dark-mode support; execution is requested separately from the task details.",
+      "Show what's currently doing on the board."
+    ],
+    "websiteURL": "https://github.com/aceHubert"
+  },
+  "homepage": "https://github.com/aceHubert"
+}
