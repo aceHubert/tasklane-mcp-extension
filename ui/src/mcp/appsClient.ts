@@ -8,6 +8,15 @@ import {
 
 type StateListener = (s: ConnState) => void;
 
+export interface ExecutionReportSnapshot {
+  taskId: string;
+  title: string;
+  priority: 'P0' | 'P1' | 'P2' | 'P3';
+  state: 'running' | 'waiting' | 'blocked' | 'failed' | 'completed';
+  activity?: string;
+  updatedAt: string;
+}
+
 export interface WidgetContext {
   mode: 'project' | 'global';
   boardHome?: string;
@@ -15,6 +24,10 @@ export interface WidgetContext {
   repoRoot?: string;
   lockedBoardId?: string;
   boardName?: string;
+  /** 普通看板入口可聚焦任务；报告卡片只有用户点击后才打开详情。 */
+  taskId?: string;
+  presentation?: 'report-card';
+  reportCard?: ExecutionReportSnapshot;
   mcpClient?: HostInfo;
   error?: string;
 }
@@ -35,13 +48,19 @@ interface AppsApp {
   getHostContext(): Record<string, unknown> | undefined;
   sendMessage(params: { role: 'user'; content: { type: 'text'; text: string }[] }): Promise<{ isError?: boolean }>;
   openLink(params: { url: string }): Promise<{ isError?: boolean }>;
+  requestDisplayMode?(params: { mode: 'fullscreen' }): Promise<{ mode: string }>;
   callServerTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<{
     content?: { type: string; text: string }[]; structuredContent?: unknown; isError?: boolean;
   }>;
 }
 
 const WIDGET_CTX_KEY = 'tasklane-ctx:';
-const APP_VERSION = '0.3.14';
+const APP_VERSION = '0.3.20';
+
+/** 专用报告资源在 bundle 执行前注入标记，等待工具结果时也不能闪现完整看板。 */
+export function isReportCardResource(): boolean {
+  return (globalThis as Record<string, unknown>).__TASKLANE_REPORT_CARD__ === true;
+}
 
 export function hasMcpAppsHost(): boolean {
   const apps = (globalThis as Record<string, unknown>).__KANBAN_MCP_APPS__;
@@ -57,16 +76,36 @@ function parseWidgetContext(result: unknown): WidgetContext | null {
   if (data.mode === 'project' && (!data.lockedBoardId || !data.repoRoot?.startsWith('/') || !data.projectDir?.startsWith('/'))) {
     return { mode: 'project', error: 'open_tasklane returned an incomplete project context' };
   }
+  // taskId 与服务端标识符同规：非空、trim 后长度 ≤ 200；非法值直接丢弃，不影响看板上下文
+  const taskId = typeof data.taskId === 'string' && data.taskId.trim().length > 0 && data.taskId.trim().length <= 200
+    ? data.taskId.trim()
+    : undefined;
+  let reportCard: ExecutionReportSnapshot | undefined;
+  if (data.presentation === 'report-card') {
+    const card = data.reportCard;
+    if (data.mode !== 'project' || !taskId || !card || card.taskId !== taskId ||
+      typeof card.title !== 'string' || !card.title.trim() ||
+      !['P0', 'P1', 'P2', 'P3'].includes(card.priority) ||
+      !['running', 'waiting', 'blocked', 'failed', 'completed'].includes(card.state) ||
+      typeof card.updatedAt !== 'string' || !Number.isFinite(Date.parse(card.updatedAt)) ||
+      (card.activity !== undefined && typeof card.activity !== 'string')) {
+      return { mode: 'project', presentation: 'report-card', error: 'task_execution action=report returned an invalid report card' };
+    }
+    reportCard = { taskId, title: card.title, priority: card.priority, state: card.state,
+      activity: card.activity, updatedAt: card.updatedAt };
+  }
   return {
     mode: data.mode, boardHome: data.boardHome, projectDir: data.projectDir, repoRoot: data.repoRoot,
-    lockedBoardId: data.lockedBoardId, boardName: data.boardName,
+    lockedBoardId: data.lockedBoardId, boardName: data.boardName, taskId,
+    presentation: data.presentation === 'report-card' ? 'report-card' : undefined, reportCard,
     mcpClient: parseHostInfo(data.mcpClient),
   };
 }
 
 function cacheScope(ctx: WidgetContext): WidgetContext {
   return { mode: ctx.mode, boardHome: ctx.boardHome, projectDir: ctx.projectDir,
-    repoRoot: ctx.repoRoot, lockedBoardId: ctx.lockedBoardId, boardName: ctx.boardName, error: ctx.error };
+    repoRoot: ctx.repoRoot, lockedBoardId: ctx.lockedBoardId, boardName: ctx.boardName, taskId: ctx.taskId,
+    presentation: ctx.presentation, reportCard: ctx.reportCard, error: ctx.error };
 }
 
 export class McpAppsClient implements BoardClient, ExecutionHost {
@@ -79,12 +118,13 @@ export class McpAppsClient implements BoardClient, ExecutionHost {
   private livePeer: HostInfo | undefined;
   onWidgetContext: ((ctx: WidgetContext) => void) | null = null;
   onHostSnapshot: ((snapshot: HostSnapshot) => void) | null = null;
+  onDisplayMode: ((mode: string) => void) | null = null;
 
   constructor() {
     try {
       if (window.name.startsWith(WIDGET_CTX_KEY)) {
         const data = JSON.parse(window.name.slice(WIDGET_CTX_KEY.length));
-        // 缓存只恢复看板范围；宿主身份只能来自本次真实连接。
+        // 缓存恢复看板范围与报告快照；宿主身份只能来自本次真实连接。
         this.widgetCtx = parseWidgetContext({ structuredContent: { ...cacheScope(data), widget: 'tasklane-board' } });
       }
     } catch {
@@ -141,7 +181,9 @@ export class McpAppsClient implements BoardClient, ExecutionHost {
     const apps = (globalThis as Record<string, unknown>).__KANBAN_MCP_APPS__ as AppsGlobal | undefined;
     if (!apps || typeof apps.App !== 'function') { this.setState('disconnected'); return; }
     try {
-      const app = new apps.App({ name: 'tasklane', version: APP_VERSION }, { availableDisplayModes: ['fullscreen'] }, { autoResize: true });
+      const reportResource = isReportCardResource() || this.widgetCtx?.presentation === 'report-card';
+      const app = new apps.App({ name: 'tasklane', version: APP_VERSION },
+        { availableDisplayModes: reportResource ? ['inline', 'fullscreen'] : ['fullscreen'] }, { autoResize: true });
       this.app = app;
       app.ontoolresult = (params) => {
         const ctx = parseWidgetContext(params);
@@ -174,6 +216,9 @@ export class McpAppsClient implements BoardClient, ExecutionHost {
           }
         }
         this.publishHost(changed);
+        if (params && typeof params === 'object' && 'displayMode' in params && typeof params.displayMode === 'string') {
+          this.onDisplayMode?.(params.displayMode);
+        }
         if (changed) void this.refreshPeer();
       };
       app.onclose = () => this.setState('disconnected');
@@ -213,6 +258,33 @@ export class McpAppsClient implements BoardClient, ExecutionHost {
       !/^codex:\/\/threads\/[A-Za-z0-9._~-]+$/.test(url)) throw new HostOperationError('unavailable');
     await hostRequest(() => app.openLink({ url }));
     if (contextVersion !== this.snapshot.contextVersion) throw new HostOperationError('contextChanged');
+  }
+
+  /** 只由报告卡片的用户点击调用；展示变更与发送执行消息使用不同能力守卫。 */
+  async expandReportCard(contextVersion: number, taskId: string, boardId: string): Promise<void> {
+    const current = () => {
+      const ctx = this.widgetCtx;
+      return this.app && this.state === 'connected' && this.snapshot.contextVersion === contextVersion &&
+        ctx?.presentation === 'report-card' && !ctx.error && ctx.taskId === taskId && ctx.lockedBoardId === boardId;
+    };
+    if (!current()) throw new Error(translate('reportCard.contextChanged'));
+    const app = this.app!;
+    const modes = app.getHostContext()?.availableDisplayModes;
+    if (!app.requestDisplayMode || (Array.isArray(modes) && !modes.includes('fullscreen'))) {
+      throw new Error(translate('reportCard.unsupported'));
+    }
+    let result: { mode: string } | undefined;
+    try {
+      await hostRequest(async () => {
+        result = await app.requestDisplayMode!({ mode: 'fullscreen' });
+        return {};
+      });
+    } catch {
+      if (!current()) throw new Error(translate('reportCard.contextChanged'));
+      throw new Error(translate('reportCard.refused'));
+    }
+    if (!current()) throw new Error(translate('reportCard.contextChanged'));
+    if (result?.mode !== 'fullscreen') throw new Error(translate('reportCard.refused'));
   }
 
   async call<T = unknown>(name: string, args: Record<string, unknown> = {}): Promise<T> {

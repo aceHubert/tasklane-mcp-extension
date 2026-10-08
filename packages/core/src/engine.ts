@@ -1,8 +1,10 @@
 import path from 'node:path';
+import { realpathSync } from 'node:fs';
 import {
   assertAssignee,
   assertPriority,
   assertStatus,
+  normalizeDeadline,
   normalizeTaskId,
   TASK_STATUSES,
   type Assignee,
@@ -14,11 +16,12 @@ import {
   type WorkItem,
   type RequestExecutionInput,
   type ExecutionDeliveryInput,
-  type ExecutionRecoveryInput,
-  type RequestExecutionRecoveryInput,
+  type ReleaseExecutionInput,
   type ClaimExecutionInput,
   type BindExecutionInput,
   type ReportExecutionInput,
+  type ReviewUpdateInput,
+  type BindExternalSessionInput,
 } from './work-item.js';
 import { BoardError } from './errors.js';
 import type { BoardStore, SessionEvent, TaskFilter } from './board-store.js';
@@ -38,7 +41,7 @@ import { GitService } from './git.js';
 import { SessionRegistry } from './session.js';
 import { NativeExecution } from './native-execution.js';
 
-/** 允许的状态流转：前向流转 + 一步回退（返工场景） */
+  /** 允许的状态流转：前向流转 + 一步回退（返工场景） */
 const ALLOWED_TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   backlog: ['ready', 'doing'],
   ready: ['doing', 'backlog'],
@@ -52,6 +55,18 @@ export interface ExecutionPatch {
   activity?: string;
 }
 
+/** 规范化项目目录：符号链接归一到真实路径，不存在时退回 resolve（供错误信息比较） */
+function canonicalDir(value: string): string {
+  try {
+    return realpathSync(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
+/** 能力刷新的最小间隔：board_list 轮询高频触发，探测按节流执行 */
+const CAPABILITY_REFRESH_MIN_INTERVAL_MS = 15_000;
+
 export class BoardEngine {
   private readonly sessions: SessionRegistry;
   private readonly nowIso: () => string;
@@ -61,6 +76,8 @@ export class BoardEngine {
    * 防止 git 等异步间隙中的读-改-写互相覆盖（并发更新丢失）。
    */
   private readonly taskLocks = new Map<string, Promise<unknown>>();
+  /** 上次 Git 能力刷新时间：进程内节流，避免 board_list 轮询高频探测 */
+  private capabilitiesRefreshedAt = 0;
 
   constructor(
     private store: BoardStore,
@@ -119,9 +136,12 @@ export class BoardEngine {
   }
 
   /**
-   * 注册已有本地 Git 仓库为新看板：先校验身份和基线（空仓库允许当前未提交分支），
-   * 回填旧看板缺失的仓库身份键，再由存储在锁内去重写入。
-   * 同一仓库（含子目录/符号链接/worktree 视角）重复注册幂等返回已有看板。
+   * 注册本地项目目录为新看板：先探测 Git 身份（明确非 Git 目录也可注册），
+   * Git 项目校验基线（空仓库允许当前未提交分支），回填旧看板缺失身份键后
+   * 由存储在锁内去重写入。同一仓库（含子目录/符号链接/worktree 视角）与
+   * 同一物理目录（符号链接等价）重复注册幂等返回已有看板。
+   * 非 Git 项目不记录仓库身份与基线；目录不存在、权限失败或 Git 探测报错
+   * 会明确抛错，不静默降级为非 Git 注册。
    */
   async registerBoard(input: {
     repo: string;
@@ -130,56 +150,93 @@ export class BoardEngine {
   }): Promise<Board> {
     const repo = input.repo?.trim();
     if (!repo) throw new BoardError('VALIDATION', 'repo 不能为空');
-    const baseBranch = input.baseBranch?.trim() || 'main';
-    const validation = await this.git.validateRepoForBoard(repo, baseBranch);
-    const name = input.name?.trim() || path.basename(validation.root);
-
-    await this.backfillBoardRepoKeys();
+    const probe = await this.git.probeRepo(repo);
+    await this.backfillBoardIdentities();
+    if (probe) {
+      const baseBranch = input.baseBranch?.trim() || 'main';
+      const validation = await this.git.validateRepoForBoard(repo, baseBranch);
+      const name = input.name?.trim() || path.basename(validation.root);
+      const { board, created } = this.store.registerBoard({
+        repoKey: validation.repoKey,
+        repo: validation.root,
+        projectDir: validation.root,
+        name,
+        baseBranch,
+      });
+      if (!created) {
+        console.error(
+          `[tasklane] 仓库已注册为看板 ${board.id}（${board.name}），返回既有看板`,
+        );
+      }
+      return board;
+    }
+    // 非 Git 项目：以规范化真实目录作为项目身份，不伪造 repoKey 或基线分支
+    const projectDir = canonicalDir(repo);
+    const name = input.name?.trim() || path.basename(projectDir);
     const { board, created } = this.store.registerBoard({
-      repoKey: validation.repoKey,
-      repo: validation.root,
+      repoKey: null,
+      repo: null,
+      projectDir,
       name,
-      baseBranch,
     });
     if (!created) {
       console.error(
-        `[tasklane] 仓库已注册为看板 ${board.id}（${board.name}），返回既有看板`,
+        `[tasklane] 项目目录已注册为看板 ${board.id}（${board.name}），返回既有看板`,
       );
     }
     return board;
   }
 
   /**
-   * 项目模式解析（open_tasklane）：先按仓库身份匹配已登记看板（匹配成功直接返回，
-   * 不因传入 baseBranch 无效而拒绝已登记仓库）；未登记时才走完整注册校验
-   * （baseBranch 缺省 main；空仓库允许当前未提交分支，其他不存在的分支仍报错）。
-   * 与 registerBoard 的区别：后者始终全量校验（显式注册时用户指定的基线错误应报错）。
+   * 项目模式解析（open_tasklane）：先按项目目录与仓库身份匹配已登记看板
+   * （匹配成功直接返回，不因传入 baseBranch 无效而拒绝已登记目录）；未登记时
+   * Git 目录走完整注册校验（baseBranch 缺省 main），非 Git 目录注册为非 Git
+   * 项目看板。与 registerBoard 的区别：后者始终全量校验（显式注册时用户指定
+   * 的基线错误应报错）。
    */
   async resolveProjectBoard(input: { repo: string; baseBranch?: string }): Promise<Board> {
     const repo = input.repo?.trim();
     if (!repo) throw new BoardError('VALIDATION', 'repo 不能为空');
-    const identity = await this.git.identifyRepo(repo);
-    await this.backfillBoardRepoKeys();
-    // 身份匹配谓词与存储 registerBoard 一致：repoKey 优先，旧看板路径兜底
+    const projectDir = canonicalDir(repo);
+    await this.backfillBoardIdentities();
+    const probe = await this.git.probeRepo(repo);
+    // 身份匹配谓词与存储 registerBoard 一致：repoKey 优先，项目目录与旧看板路径兜底
     const existing = this.store.boards.find(
-      (b) => b.repoKey === identity.repoKey || (b.repo != null && b.repo === identity.root),
+      (b) =>
+        (probe && (b.repoKey === probe.repoKey ||
+          (b.repo != null && b.repo === probe.root))) ||
+        (b.projectDir != null && canonicalDir(b.projectDir) === projectDir),
     );
     if (existing) return structuredClone(existing);
-    // 未登记：校验已存在的基线或空仓库当前未提交分支，缺省 main，不接受任意未来分支。
+    if (!probe) {
+      // 未登记的非 Git 目录：注册为非 Git 项目看板，不要求初始化 Git
+      const { board } = this.store.registerBoard({
+        repoKey: null,
+        repo: null,
+        projectDir,
+        name: path.basename(projectDir),
+      });
+      return board;
+    }
+    // 未登记 Git 仓库：校验已存在的基线或空仓库当前未提交分支，缺省 main
     const baseBranch = input.baseBranch?.trim() || 'main';
     const validation = await this.git.validateRepoForBoard(repo, baseBranch);
     const { board } = this.store.registerBoard({
       repoKey: validation.repoKey,
       repo: validation.root,
+      projectDir: validation.root,
       name: path.basename(validation.root),
       baseBranch,
     });
     return board;
   }
 
-  /** 为缺少仓库身份键的旧看板回填 repoKey（一次 Git 调用，锁内条件写入） */
-  private async backfillBoardRepoKeys(): Promise<void> {
+  /** 为缺少仓库身份键/项目目录的旧看板回填（目录回填不需要 Git 调用） */
+  private async backfillBoardIdentities(): Promise<void> {
     for (const board of this.store.boards) {
+      if (board.repo && !board.projectDir) {
+        this.store.mutateBoard(board.id, (b) => (b.projectDir ? b : { ...b, projectDir: b.repo ?? undefined }));
+      }
       if (board.repoKey || !board.repo) continue;
       try {
         // 只识别身份，不校验基线：旧看板基线漂移不应阻止身份回填
@@ -193,6 +250,64 @@ export class BoardEngine {
       } catch {
         /* 旧看板仓库已不可用：保留原状，注册去重退化为路径匹配 */
       }
+    }
+  }
+
+  /**
+   * Git 能力动态刷新：按各看板目录当前实际状态重新探测 Git 身份，在锁内合并
+   * 最新数据。非 Git 目录初始化 Git 后采纳仓库身份（保留 boardId、任务、
+   * 会话绑定与项目目录，无需重新添加）；Git 被移除时撤销对应能力（目录仍可
+   * 用于目录执行）；目录身份与已有看板冲突时不自动合并，记录 repoConflict
+   * 供 UI 显式提示。探测失败（目录丢失、Git 损坏）同样记录冲突说明，不静默
+   * 撤销能力。正在执行的会话与 workspace 不受刷新影响（只改看板字段）。
+   */
+  async refreshBoardGitCapabilities(): Promise<void> {
+    // Git 被显式禁用（TASKLANE_GIT=off）时不探测：保留存储中的能力状态，
+    // 由具体操作的既有 enabled 守卫限制分支/diff/worktree 能力
+    if (!this.git.enabled) return;
+    const boards = this.store.boards;
+    for (const board of boards) {
+      if (!board.projectDir) continue; // 无项目看板没有可探测目录
+      let probe: Awaited<ReturnType<GitService['probeRepo']>> = null;
+      let error: string | null = null;
+      try {
+        probe = await this.git.probeRepo(board.projectDir);
+      } catch (err) {
+        error = err instanceof Error ? err.message : String(err);
+      }
+      this.store.mutateBoard(board.id, (current) => {
+        if (current.projectDir !== board.projectDir) return current; // 并发变更，留给下次刷新
+        const next = { ...current };
+        if (error) {
+          // 目录不可访问或 Git 损坏：明确报告，不撤销已有能力（避免瞬态误伤）
+          next.repoConflict = `Git 能力探测失败: ${error}`.slice(0, 200);
+          return next;
+        }
+        if (probe) {
+          if (current.repoKey === probe.repoKey) {
+            next.repo = probe.root;
+            next.repoConflict = null;
+            return next;
+          }
+          const conflict = boards.find((b) => b.id !== current.id && b.repoKey === probe!.repoKey);
+          if (conflict) {
+            // 与已有看板同仓库：不自动合并、不迁移任务，显式提示冲突
+            next.repoConflict = `目录已属于看板 ${conflict.name}（${conflict.id}）的仓库，本看板保持非 Git 项目`;
+            return next;
+          }
+          // 采纳/更新仓库身份：boardId、任务、会话绑定与项目目录保持不变
+          next.repoKey = probe.repoKey;
+          next.repo = probe.root;
+          next.repoConflict = null;
+          next.baseBranch ??= 'main';
+          return next;
+        }
+        // 明确不再是 Git 仓库：撤销 Git 能力，目录执行与普通任务不受影响
+        next.repoKey = null;
+        next.repo = null;
+        next.repoConflict = null;
+        return next;
+      });
     }
   }
 
@@ -212,36 +327,67 @@ export class BoardEngine {
     });
   }
 
+  /**
+   * board_list 入口：节流触发 Git 能力刷新（项目打开/切换/看板刷新时更新能力；
+   * 最终准入仍以各操作执行前的再次核验为准，UI 展示不作为准入依据），
+   * 刷新失败不阻塞列表返回。force 用于显式刷新场景绕过节流。
+   */
+  async listBoardsWithRefresh(force = false): Promise<BoardSummary[]> {
+    const now = Date.now();
+    if (force || now - this.capabilitiesRefreshedAt >= CAPABILITY_REFRESH_MIN_INTERVAL_MS) {
+      this.capabilitiesRefreshedAt = now;
+      try {
+        await this.refreshBoardGitCapabilities();
+      } catch (err) {
+        console.error('[tasklane] Git 能力刷新失败:', err instanceof Error ? err.message : err);
+      }
+    }
+    return this.boardList();
+  }
+
   listTasks(filter?: TaskFilter): WorkItem[] {
     // 业务层默认口径：未显式指定 archive 时按 active（归档任务从日常看板移出）。
     // 需要完整数据的内部处理直接使用 store（undefined 不约束）。
     const resolved: TaskFilter = { ...filter, archive: filter?.archive ?? 'active' };
+    let tasks: WorkItem[];
     if (resolved.boardId !== undefined) {
       this.requireBoard(resolved.boardId);
-      return this.store.listTasks(resolved);
+      tasks = this.store.listTasks(resolved);
+    } else {
+      // 省略 boardId：单看板自动解析；多看板必须显式指定，不得混出全部任务
+      const boards = this.store.boards;
+      if (boards.length === 1) {
+        tasks = this.store.listTasks({ ...resolved, boardId: boards[0].id });
+      } else {
+        throw new BoardError(
+          'VALIDATION',
+          `存在 ${boards.length} 个看板，task_list 必须通过 boardId 指定目标（board_list 可查全部）`,
+        );
+      }
     }
-    // 省略 boardId：单看板自动解析；多看板必须显式指定，不得混出全部任务
-    const boards = this.store.boards;
-    if (boards.length === 1) {
-      return this.store.listTasks({ ...resolved, boardId: boards[0].id });
-    }
-    throw new BoardError(
-      'VALIDATION',
-      `存在 ${boards.length} 个看板，task_list 必须通过 boardId 指定目标（board_list 可查看全部）`,
-    );
+    return tasks.map((task) => this.withReviewView(task));
+  }
+
+  /**
+   * 读取侧 Review 惰性视图：v6 迁移不回填 review 字段，status=review 且无持久化
+   * review 的任务按 pending 呈现（不落盘，首次真实流转时才持久化整个对象）。
+   */
+  private withReviewView(task: WorkItem): WorkItem {
+    if (task.status !== 'review' || task.review) return task;
+    return { ...task, review: { status: 'pending', revision: 0, rounds: [], updatedAt: task.updatedAt } };
   }
 
   getTask(id: string, boardId?: string): WorkItem {
     const task = this.requireTask(id);
     this.assertBoardMatch(task, boardId);
-    return task;
+    return this.withReviewView(task);
   }
 
   getTaskWithTimeline(id: string, boardId?: string): { task: WorkItem; timeline: SessionEvent[] } {
     const task = this.requireTask(id);
     this.assertBoardMatch(task, boardId);
     const record = this.store.getSession(task.id);
-    return { task, timeline: record ? record.events.slice(-12) : [] };
+    return { task: this.withReviewView(task), timeline: record ? record.events.slice(-12) : [] };
   }
 
   async createTask(input: {
@@ -250,6 +396,7 @@ export class BoardEngine {
     description?: string;
     priority?: Priority;
     status?: TaskStatus;
+    deadline?: string;
   }): Promise<WorkItem> {
     const title = input.title?.trim();
     if (!title) throw new BoardError('VALIDATION', 'title 不能为空');
@@ -268,6 +415,7 @@ export class BoardEngine {
       priority,
       assignee: 'human',
       execution: { state: 'idle', updatedAt: now },
+      ...(input.deadline !== undefined ? { deadline: normalizeDeadline(input.deadline) } : {}),
       createdAt: now,
       updatedAt: now,
     });
@@ -281,6 +429,8 @@ export class BoardEngine {
     title?: string;
     description?: string;
     priority?: Priority;
+    /** null 表示清除截止时间；字符串表示设置（规范化为 UTC ISO） */
+    deadline?: string | null;
     execution?: ExecutionPatch;
   }): Promise<WorkItem> {
     const id = normalizeTaskId(input.id);
@@ -303,9 +453,13 @@ export class BoardEngine {
         assertPriority(input.priority);
         n.priority = input.priority;
       }
+      if (input.deadline !== undefined) {
+        // 显式传 null 清除；设置时规范化为 UTC ISO，保证列表排序可比
+        n.deadline = input.deadline === null ? undefined : normalizeDeadline(input.deadline);
+      }
 
       if (input.execution !== undefined) {
-        throw new BoardError('EXECUTION_REPORT_REQUIRED', '执行状态必须通过 task_execution_report 关联真实聊天和本轮 runId');
+        throw new BoardError('EXECUTION_REPORT_REQUIRED', '执行状态必须通过 task_execution action=report 关联真实聊天和本轮 runId');
       }
 
       n.updatedAt = now;
@@ -334,6 +488,10 @@ export class BoardEngine {
         from = task.status;
         const n = structuredClone(task);
         n.status = status;
+        // 进入 Review 列时初始化结构化 Review 工作流（已有 review 对象原样保留历史轮次）
+        if (status === 'review' && !n.review) {
+          n.review = { status: 'pending', revision: 0, rounds: [], updatedAt: now };
+        }
         n.updatedAt = now;
 
         return n;
@@ -375,12 +533,8 @@ export class BoardEngine {
     return this.nativeExecution.request(input);
   }
 
-  requestExecutionRecovery(input: RequestExecutionRecoveryInput) {
-    return this.nativeExecution.requestRecovery(input);
-  }
-
-  recoverExecution(input: ExecutionRecoveryInput) {
-    return this.nativeExecution.recover(input);
+  releaseExecution(input: ReleaseExecutionInput) {
+    return this.nativeExecution.release(input);
   }
 
   markExecutionDelivery(input: ExecutionDeliveryInput) {
@@ -397,6 +551,16 @@ export class BoardEngine {
 
   reportExecution(input: ReportExecutionInput) {
     return this.nativeExecution.report(input);
+  }
+
+  /** Review 状态更新（revision/CAS）：由 Core 校验状态机，UI 与跨 Agent 更新共用 */
+  updateReview(input: ReviewUpdateInput) {
+    return this.nativeExecution.updateReview(input);
+  }
+
+  /** 记录非 Codex 实现会话（provider-local sessionId + 实际工作区，不含 threadId 语义） */
+  bindExternalSession(input: BindExternalSessionInput) {
+    return this.nativeExecution.bindExternal(input);
   }
 
   /**

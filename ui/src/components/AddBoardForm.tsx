@@ -18,8 +18,10 @@ export function AddBoardForm({ onDone }: { onDone: () => void }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [browsing, setBrowsing] = useState(false);
-  // 选中仓库后基线由检测接管：main 优先，其次 master，无提交时取当前分支，其余默认 main。
+  // 选中仓库后基线由检测接管：main 优先，其次 master，无提交时取当前分支，其余默认 main；
+  // 从目录选择器"使用当前目录"添加非 Git 目录时 baseBranch 为空串，基线分支不适用。
   const [picked, setPicked] = useState<{ baseBranch: string } | null>(null);
+  const nonGitPicked = picked !== null && picked.baseBranch === '';
 
   const submit = async () => {
     const repoTrimmed = repo.trim();
@@ -29,7 +31,7 @@ export function AddBoardForm({ onDone }: { onDone: () => void }) {
     const result = await addBoard({
       repo: repoTrimmed,
       name: name.trim() || undefined,
-      baseBranch: baseBranch.trim() || 'main',
+      ...(nonGitPicked ? {} : { baseBranch: baseBranch.trim() || 'main' }),
     });
     if (result.ok) {
       onDone();
@@ -103,9 +105,9 @@ export function AddBoardForm({ onDone }: { onDone: () => void }) {
             value={picked ? picked.baseBranch : baseBranch}
             onChange={(e) => setBaseBranch(e.target.value)}
             disabled={picked !== null}
-            placeholder={
-              picked ? t('add.basePickedPlaceholder', { branch: picked.baseBranch }) : t('add.basePlaceholder')
-            }
+            placeholder={nonGitPicked ? t('add.nonGitHint') : picked
+              ? t('add.basePickedPlaceholder', { branch: picked.baseBranch })
+              : t('add.basePlaceholder')}
             title={picked ? t('add.basePickedTitle') : t('add.baseTitle')}
           />
         </label>

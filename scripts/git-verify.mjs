@@ -232,12 +232,21 @@ check(
   engineMulti.boardList().filter((b) => b.repoKey === boardA.repoKey).length === 1,
 );
 
-// 非法输入：不存在的路径 / 非仓库目录 / 不存在的基线分支 / 裸仓库
-const notRepo = mkdtempSync(path.join(tmpdir(), 'ck-notrepo-'));
+// 非法输入：不存在的路径 / 文件路径 / 不存在的基线分支 / 裸仓库
+// （非 Git 目录现在合法注册为项目看板：repoKey 为空、projectDir 记录真实路径）
+const notRepo = realpathSync(mkdtempSync(path.join(tmpdir(), 'ck-notrepo-')));
+const nonGitBoard = await engineMulti.registerBoard({ repo: notRepo, name: '非 Git 项目' });
+check(
+  'S6 非 Git 目录注册为项目看板（无仓库身份、目录幂等去重）',
+  nonGitBoard.repoKey === null && nonGitBoard.repo === null && nonGitBoard.projectDir === notRepo &&
+    (await engineMulti.registerBoard({ repo: notRepo })).id === nonGitBoard.id,
+);
+const plainFile = path.join(notRepo, 'plain-file.txt');
+writeFileSync(plainFile, 'not a directory');
 let errCount = 0;
 for (const [label, input] of [
   ['不存在路径', { repo: '/nonexistent/path/xyz' }],
-  ['非 Git 目录', { repo: notRepo }],
+  ['文件路径', { repo: plainFile }],
   ['不存在分支', { repo: repoB.dir, baseBranch: 'no-such' }],
 ]) {
   try {
@@ -255,9 +264,9 @@ try {
   console.error('  S6 裸仓库未被拒绝');
 } catch (err) {
   if (err instanceof BoardError && err.code === 'VALIDATION') errCount += 1;
-  else console.error('  S6 裸仓库错误码异常:', err?.code ?? err?.message);
+  else console.error(`  S6 裸仓库错误码异常:`, err?.code ?? err?.message);
 }
-check('S6 非法注册输入（路径/非仓库/分支/裸仓库）全部明确报错', errCount === 4);
+check('S6 非法注册输入（路径/文件/分支/裸仓库）全部明确报错', errCount === 4);
 
 /* ---------- S7：双引擎并发指派同一任务，无执行创建副作用 ---------- */
 const homeConc = mkdtempSync(path.join(tmpdir(), 'ck-conc-'));

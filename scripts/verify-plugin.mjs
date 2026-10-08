@@ -98,17 +98,24 @@ try {
   const expected = [
     'task_export',
     'board_list', 'board_create', 'dir_list', 'model_list', 'task_list', 'task_get',
-    'task_create', 'task_update', 'task_delete', 'task_move', 'task_assign',
+    'task_create', 'task_update', 'task_delete', 'task_move',
     'task_archive', 'task_restore', 'task_archive_done',
-    'task_execution_request', 'task_execution_delivery', 'task_execution_claim',
-    'task_execution_bind', 'task_execution_report', 'open_tasklane', 'tasklane_host_info',
-    'task_execution_recovery_request', 'task_execution_recover',
+    'task_execution', 'task_execution_recover', 'open_tasklane', 'tasklane_host_info',
   ];
-  check(`tools/list has ${expected.length} tools`, names.length === expected.length && expected.every((n) => names.includes(n)), `got: ${names.join(', ')}`);
+  const visibility = (name) => {
+    const tool = (tools.result?.tools ?? []).find((t) => t.name === name);
+    return Array.isArray(tool?._meta?.ui?.visibility) ? tool._meta.ui.visibility : undefined;
+  };
+  check(`tools/list 收敛为 ${expected.length} 个工具（11 模型可见 + 7 app-only）`,
+    names.length === expected.length && expected.every((n) => names.includes(n)) &&
+      ['task_export', 'dir_list', 'model_list', 'task_delete', 'task_archive_done', 'task_execution_recover', 'tasklane_host_info']
+        .every((n) => visibility(n)?.includes('app') && !visibility(n)?.includes('model')) &&
+      ['task_update', 'task_execution', 'task_list', 'task_archive'].every((n) => visibility(n) === undefined || visibility(n)?.includes('model')),
+    `got: ${names.join(', ')}`);
 
   const openTool = (tools.result?.tools ?? []).find((t) => t.name === 'open_tasklane');
   const meta = openTool?._meta ?? {};
-  check('open_tasklane exposes ui.resourceUri', meta.ui?.resourceUri === 'ui://widget/tasklane/board-panel-v0314.html', JSON.stringify(meta.ui));
+  check('open_tasklane exposes ui.resourceUri', meta.ui?.resourceUri === 'ui://widget/tasklane/board-panel-v0320.html', JSON.stringify(meta.ui));
   const entrypoints = meta['openai/ui']?.entrypoints ?? [];
   check('open_tasklane has global entrypoint', entrypoints.some((entry) => entry.type === 'global'));
   check('open_tasklane has thread entrypoint', entrypoints.some((entry) => entry.type === 'thread'));
@@ -118,6 +125,19 @@ try {
     'open_tasklane declares projectDir input',
     JSON.stringify(openTool?.inputSchema ?? {}).includes('projectDir'),
   );
+
+  /* ---------- report 报告卡片绑定 ---------- */
+  const reportTool = (tools.result?.tools ?? []).find((t) => t.name === 'task_execution');
+  const reportMeta = reportTool?._meta ?? {};
+  const reportUri = 'ui://widget/tasklane/report-card-v0320.html';
+  check('task_execution（report 分支）绑定独立报告卡片，不复用默认打开的看板',
+    reportMeta.ui?.resourceUri === reportUri && reportUri !== meta.ui?.resourceUri &&
+    reportMeta['openai/outputTemplate'] === reportUri &&
+    reportMeta['openai/widgetAccessible'] === true &&
+    typeof reportMeta['openai/toolInvocation/invoking'] === 'string' &&
+    typeof reportMeta['openai/toolInvocation/invoked'] === 'string',
+    JSON.stringify(reportMeta));
+  check('报告卡片工具不添加侧边栏入口', reportMeta['openai/ui'] === undefined, JSON.stringify(reportMeta['openai/ui']));
 
   /* ---------- 全局模式 ---------- */
   const open = await call('open_tasklane');
@@ -257,9 +277,42 @@ try {
   const locked = boardsList.find((b) => b.id === pd?.lockedBoardId);
   check('board_list 计数包含项目模式创建的任务', locked?.total === 1, JSON.stringify(boardsList.map((b) => [b.id, b.total])));
 
+  // 临时仓库中的真实协议链：确认回执关联卡片资源，且携带当前执行的只读快照。
+  const requested = await call('task_execution', { id: task.id, boardId: pd.lockedBoardId,
+    action: 'request', requestAction: 'start', requestId: 'inline-report-request', workspaceMode: 'project',
+    hostId: 'fixture-host', receiverThreadId: 'fixture-receiver' });
+  const receipt = { id: task.id, boardId: pd.lockedBoardId, requestId: 'inline-report-request',
+    runId: requested.result?.structuredContent?.request?.runId };
+  const binding = { ...receipt, claimId: 'inline-report-claim', hostId: 'fixture-host',
+    threadId: 'fixture-thread', workspacePath: realRepoP, workspaceOwner: 'user', branch: 'main' };
+  await call('task_execution', { action: 'claim', ...receipt, claimId: binding.claimId });
+  await call('task_execution', { action: 'bind', ...binding, phase: 'created' });
+  await call('task_execution', { action: 'bind', ...binding, phase: 'bound' });
+  for (const state of ['running', 'completed']) {
+    const reported = await call('task_execution', { action: 'report', ...receipt, hostId: binding.hostId,
+      threadId: binding.threadId, reportId: `inline-report-${state}`, state, activity: `协议检查 ${state}` });
+    const data = reported.result?.structuredContent;
+    check(`${state} 回执只关联卡片快照，不复用看板打开结果`,
+      reported.result?.isError !== true && reported.result?._meta?.['openai/outputTemplate'] === reportUri &&
+      data?.presentation === 'report-card' && data.reportCard?.taskId === task.id &&
+      data.reportCard?.title === task.title && data.reportCard?.state === state &&
+      data.lockedBoardId === pd.lockedBoardId && data.projectDir === realRepoP);
+  }
+
   const resources = await request('resources/list', {});
   const uris = (resources.result?.resources ?? []).map((r) => r.uri);
   check('resources/list exposes widget uri', uris.includes(meta.ui?.resourceUri), uris.join(', '));
+  const reportResource = (resources.result?.resources ?? []).find((r) => r.uri === reportUri);
+  check('报告资源默认 inline，用户点击才允许 fullscreen',
+    JSON.stringify(reportResource?._meta?.['openai/ui']?.availableDisplayModes) === '["inline","fullscreen"]' &&
+    reportResource?._meta?.['openai/ui']?.preferredDisplayMode === 'inline');
+  const reportRead = await request('resources/read', { uri: reportUri });
+  const reportContent = reportRead.result?.contents?.[0];
+  check('报告 HTML 独立卡片入口与 inline 模式，保留 SDK 桥',
+    reportContent?.mimeType === 'text/html;profile=mcp-app' &&
+    reportContent?._meta?.['openai/ui']?.preferredDisplayMode === 'inline' &&
+    reportContent?.text?.includes('globalThis.__TASKLANE_REPORT_CARD__=true;') &&
+    reportContent?.text?.includes('__KANBAN_MCP_APPS__'));
   const resource = (resources.result?.resources ?? []).find((r) => r.uri === meta.ui?.resourceUri);
   check('资源列表声明应用面板显示模式',
     JSON.stringify(resource?._meta?.['openai/ui']?.availableDisplayModes) === '["fullscreen"]' &&
@@ -277,7 +330,7 @@ try {
 
   const manifest = JSON.parse(readFileSync(path.join(ROOT, 'plugins/tasklane/.codex-plugin/plugin.json'), 'utf8'));
   const marketplace = JSON.parse(readFileSync(path.join(ROOT, '.claude-plugin/marketplace.json'), 'utf8'));
-  check('市场、插件与实际服务版本一致', manifest.version === '0.3.14' && serverInfo.version === manifest.version && marketplace.plugins.find((plugin) => plugin.name === 'tasklane')?.version === manifest.version);
+  check('市场、插件与实际服务版本一致', manifest.version === '0.3.20' && serverInfo.version === manifest.version && marketplace.plugins.find((plugin) => plugin.name === 'tasklane')?.version === manifest.version);
   const skillPath = path.join(ROOT, 'plugins/tasklane', manifest.skills ?? '__missing_skills__', 'open-tasklane/SKILL.md');
   check('插件声明并打包打开技能', manifest.skills === './skills/' && readFileSync(skillPath, 'utf8').startsWith('---\n'));
   const nativeSkillPath = path.join(ROOT, 'plugins/tasklane', manifest.skills, 'native-execution/SKILL.md');
@@ -288,7 +341,7 @@ try {
     readFileSync(nativeSkillPath, 'utf8').includes('CODEX_THREAD_ID') &&
     !content?.text?.includes('callbackThreadId') && !readFileSync(nativeSkillPath, 'utf8').includes('callbackThreadId'));
   check('插件打包原生执行技能及禁止兜底约束',
-    readFileSync(nativeSkillPath, 'utf8').includes('task_execution_report') &&
+    readFileSync(nativeSkillPath, 'utf8').includes('task_execution action=report') &&
     readFileSync(nativeSkillPath, 'utf8').includes('reliable interrupt route is unavailable'));
   check('打开工具不要求独立原生能力声明', !openTool.inputSchema?.properties?.nativeExecution &&
     widgetData?.nativeExecution === undefined && pd?.nativeExecution === undefined);

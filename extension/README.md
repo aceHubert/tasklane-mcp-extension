@@ -1,6 +1,6 @@
 # TaskLane 原生应用插件接入
 
-本目录维护现有 Codex 插件源码；当前源版本 `0.3.14`，身份保持 `tasklane@tasklane`。
+本目录维护现有 Codex 插件源码；插件身份保持 `tasklane@tasklane`，发布版本以 `plugin.json` 与 `.claude-plugin/marketplace.json` 为准。
 
 ## 构建与打开
 
@@ -19,15 +19,27 @@ pnpm verify:plugin
 旧写进程；v1/v2/v3 会锁内备份 `.vN.bak` 后迁移为 v4，不支持新旧服务混用。
 
 项目聊天调用 `open_tasklane({ projectDir, baseBranch? })`；全局看板调用 `open_tasklane({})`。
-projectDir 必须是当前聊天工作区绝对路径；子目录/worktree 会归位主仓库并锁定 lockedBoardId。
+projectDir 必须是当前聊天工作区绝对路径；Git 子目录/worktree 会归位主仓库并锁定
+lockedBoardId，非 Git 目录按真实路径注册为项目看板（repoRoot 回退 projectDir）。
 不从插件目录推断项目。打开失败保留错误空态，不回退全局第一看板或浏览器。
 无提交仓库可管理任务；基线需匹配当前未提交分支，默认 main。不能为打开看板自动首次提交。
+非 Git 项目可打开、执行与验收；Git 分支管理与 worktree 创建不可用（后续初始化 Git
+由 board_list 能力刷新自动获得，无需重新添加）。
 
-插件声明 global/thread 入口和 fullscreen MCP Apps 资源。入口声明和工具成功都不证明
-真实宿主已经正确显示、路由或执行。普通 `pnpm mcp` 只有业务工具，未注册面板资源；
+插件的普通看板声明 global/thread 入口和 fullscreen MCP Apps 资源。
+报告回执另用 `report-card-v0318.html`：默认 inline 紧凑任务卡片，点击“查看详情”后才
+请求 fullscreen 并打开锁定任务。`open_tasklane` 仍使用完整看板资源；回执不复用该
+打开入口。宿主不支持或拒绝 fullscreen 时，卡片保留并提示错误，不自动打开详情。
+
+入口声明和工具成功都不证明真实宿主已经正确显示、路由或执行。
+普通 `pnpm mcp` 只有业务工具，未注册面板资源；
 独立浏览器仅用于明确要求的开发/验证，不作为原生执行兜底。
 
 ## 已连接 Codex 直接提交任务
+
+项目任务处于 Review 时，隐藏通用“在 Codex 中继续执行”及其提示词，保留原有
+“开始 Review／继续修改／继续验收”入口。审核结论、提示词和阶段流转规则保持原样。
+无项目任务也隐藏继续执行按钮及续接提示词；非 Review 阶段的初次启动入口保持原样。
 
 MCP Apps SDK `1.7.4` 提供 getHostVersion、getHostCapabilities、sendMessage、openLink。
 标准 hostCapabilities 只有 message/openLinks 等通道能力，没有 create_thread、目标线程
@@ -51,14 +63,17 @@ MCP Apps SDK `1.7.4` 提供 getHostVersion、getHostCapabilities、sendMessage�
 
 ## 用户请求与真实执行
 
-详情明确选择主仓库新聊天、独立 worktree 新聊天或原样复用旧工作区。
+详情明确选择主仓库新聊天、独立 worktree 新聊天、原样复用旧工作区，或（未绑定仓库的
+default 看板）无项目执行：聊天以 `create_thread target {type:'projectless'}` 创建、不传
+projectId，绑定只保存真实 threadId/hostId、不记录工作区，任务不参与验收流转。
+非 Git 项目在项目目录执行，create_thread 需匹配宿主已登记项目；worktree 入口不可用。
 UI 先通过 MCP 记录请求，再 sendMessage 给关联接收 Agent；接收方重新读取任务和看板，
 认领请求后调用实际原生聊天工具，保存 created 结果再 bound，目标聊天核对目录后报告
 真实 running。继续、回复和重试复用已有绑定，完整回复不截断。
 
-普通 task_assign 只改变负责人，不创建 sess-*、分支/worktree，也不启停 Agent。
+普通 task_update action=assign 只改变负责人，不创建 sess-*、分支/worktree，也不启停 Agent。
 task_move 只改业务阶段，投递/创建/Doing 不证明 running；执行更新必须走匹配真实绑定
-和本轮 runId 的 task_execution_report。旧 sess-* 不转换成 threadId，不复制它冒充真实会话。
+和本轮 runId 的 task_execution action=report。旧 sess-* 不转换成 threadId，不复制它冒充真实会话。
 
 新独立 worktree 由 Codex 管理。旧 TaskLane 工作区必须完整复用；不支持复用时明确
 提示，不能换到主仓库或另建目录。所有工具守卫归档、看板归属、认领、当前代次与绑定。

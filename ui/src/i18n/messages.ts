@@ -32,6 +32,7 @@ const zh = {
   'header.searchPlaceholder': '搜索 ID / 标题 / 分支…',
   'header.searchAria': '搜索任务',
   'header.boardOption': '{name}（{count}）',
+  'header.boardOptionNonGit': '{name}（{count}·非 Git）',
   'header.themeLightAria': '切换到浅色主题',
   'header.themeDarkAria': '切换到深色主题',
   'header.themeLight': '浅色主题',
@@ -50,6 +51,8 @@ const zh = {
   // 执行态（Agent · state）
   'exec.idle': '空闲',
   'exec.assigned': '已指派',
+  'card.execTag': '执行',
+  'card.reviewTag': '验收',
   'exec.starting': '启动中',
   'exec.running': '运行中',
   'exec.waiting': '等待输入',
@@ -81,6 +84,17 @@ const zh = {
   'card.completed': '已完成',
   'card.taskAria': '任务 {id}：{title}',
   'card.files': '{count} 个文件',
+  'card.overdue': '已过期',
+
+  // 会话执行报告卡片
+  'reportCard.aria': 'TaskLane 执行报告卡片',
+  'reportCard.label': '执行报告',
+  'reportCard.loading': '正在读取执行报告…',
+  'reportCard.openDetail': '查看详情',
+  'reportCard.opening': '正在打开…',
+  'reportCard.unsupported': '当前宿主不支持展开详情，执行报告已保留。',
+  'reportCard.refused': '宿主未允许打开详情，请重试。执行报告已保留。',
+  'reportCard.contextChanged': '报告上下文已改变，请从当前卡片重新打开详情。',
 
   // 任务详情
   'detail.closeAria': '关闭详情',
@@ -89,8 +103,11 @@ const zh = {
   'detail.titleAria': '任务标题',
   'detail.statusAria': '任务状态',
   'detail.priorityAria': '优先级',
+  'detail.deadlineAria': '截止时间',
+  'detail.deadlineClear': '清除',
   'detail.fieldStatus': '状态',
   'detail.fieldPriority': '优先级',
+  'detail.fieldDeadline': '截止时间',
   'detail.fieldDescription': '描述',
   'detail.notDirect': '（不可直达）',
   'detail.descPlaceholder': '补充上下文（Markdown）…',
@@ -131,6 +148,7 @@ const zh = {
   'form.titlePlaceholder': '例如：Add OAuth callback handler',
   'form.descPlaceholder': '可选，Markdown；Agent 会通过 MCP 读取',
   'form.initialStatus': '初始状态',
+  'form.deadline': '截止时间（可选）',
   'form.plainHint': '创建后保持人工标识；在详情点击运行，提交执行请求后自动标记为 Agent。',
   'form.create': '创建',
   'form.noTaskId': 'task_create 未返回任务 ID',
@@ -167,7 +185,7 @@ const zh = {
 
   // 添加仓库表单
   'add.closeAria': '关闭添加仓库表单',
-  'add.repoPathLabel': '仓库绝对路径 *',
+  'add.repoPathLabel': '项目目录绝对路径 *',
   'add.repoPathPlaceholder': '例如 /Users/you/projects/my-repo',
   'add.browse': '浏览…',
   'add.browseTitle': '浏览本机目录选择 Git 仓库',
@@ -179,7 +197,8 @@ const zh = {
   'add.basePickedTitle': '基线分支检测：优先 main，其次 master，无提交时取当前分支，其余默认 main',
   'add.baseTitle': '已有提交时须为已存在的本地分支；无提交时须与当前分支一致',
   'add.hint':
-    '注册已有本地 Git 仓库为新看板；子目录、符号链接与 worktree 会自动归位到主仓库。重复注册同一仓库时直接切换到已有看板。尚无提交的仓库也可添加，创建任务 worktree 前才需要首次提交。',
+    '注册本地项目目录为新看板；Git 仓库的子目录、符号链接与 worktree 会自动归位到主仓库。非 Git 目录同样可添加（Git 分支与 worktree 能力不可用，后续初始化 Git 自动获得）。重复注册同一仓库或目录时直接切换到已有看板。尚无提交的仓库也可添加，创建任务 worktree 前才需要首次提交。',
+  'add.nonGitHint': '检测为非 Git 目录：将按项目目录注册；Git 分支管理与创建 worktree 不可用，任务仍在该目录执行与验收。',
   'add.registering': '注册中…',
   'add.submit': '添加',
 
@@ -194,8 +213,10 @@ const zh = {
   'picker.noSubdirs': '此目录下没有可见的子目录',
   'picker.subdirsAria': '子目录列表',
   'picker.useRepo': '使用仓库 {path}（基线：{branch}）',
+  'picker.useCurrent': '使用当前目录 {path}',
+  'picker.useCurrentTitle': '将当前目录作为项目添加（非 Git 目录同样可用）',
   'picker.enter': '进入 {name}',
-  'picker.hint': '点击 Git 仓库直接选用；点击普通文件夹进入下一级。隐藏目录不展示。',
+  'picker.hint': '点击 Git 仓库直接选用；点击普通文件夹进入下一级，或使用底部按钮把当前目录添加为项目。隐藏目录不展示。',
 
   // 操作反馈（toast / prompt / 错误）
   'toast.mcpOk': '{call} 成功',
@@ -282,6 +303,7 @@ const en: Record<MessageKey, string> = {
   'header.searchPlaceholder': 'Search ID / title / branch…',
   'header.searchAria': 'Search tasks',
   'header.boardOption': '{name} ({count})',
+  'header.boardOptionNonGit': '{name} ({count} · non-Git)',
   'header.themeLightAria': 'Switch to light theme',
   'header.themeDarkAria': 'Switch to dark theme',
   'header.themeLight': 'Light theme',
@@ -298,6 +320,8 @@ const en: Record<MessageKey, string> = {
 
   'exec.idle': 'Idle',
   'exec.assigned': 'Assigned',
+  'card.execTag': 'Exec',
+  'card.reviewTag': 'Review',
   'exec.starting': 'Starting',
   'exec.running': 'Running',
   'exec.waiting': 'Waiting for input',
@@ -327,6 +351,16 @@ const en: Record<MessageKey, string> = {
   'card.completed': 'Completed',
   'card.taskAria': 'Task {id}: {title}',
   'card.files': '{count} files',
+  'card.overdue': 'overdue',
+
+  'reportCard.aria': 'TaskLane execution report card',
+  'reportCard.label': 'Execution report',
+  'reportCard.loading': 'Loading execution report…',
+  'reportCard.openDetail': 'View details',
+  'reportCard.opening': 'Opening…',
+  'reportCard.unsupported': 'This host cannot expand task details. The execution report remains available.',
+  'reportCard.refused': 'The host did not allow task details to open. Please retry. The execution report remains available.',
+  'reportCard.contextChanged': 'The report context changed. Open details again from the current card.',
 
   'detail.closeAria': 'Close details',
   'detail.copyIdAria': 'Copy task ID',
@@ -334,8 +368,11 @@ const en: Record<MessageKey, string> = {
   'detail.titleAria': 'Task title',
   'detail.statusAria': 'Task status',
   'detail.priorityAria': 'Priority',
+  'detail.deadlineAria': 'Deadline',
+  'detail.deadlineClear': 'Clear',
   'detail.fieldStatus': 'Status',
   'detail.fieldPriority': 'Priority',
+  'detail.fieldDeadline': 'Deadline',
   'detail.fieldDescription': 'Description',
   'detail.notDirect': ' (not directly reachable)',
   'detail.descPlaceholder': 'Add context (Markdown)…',
@@ -375,6 +412,7 @@ const en: Record<MessageKey, string> = {
   'form.titlePlaceholder': 'e.g. Add OAuth callback handler',
   'form.descPlaceholder': 'Optional; Markdown. The agent reads it via MCP',
   'form.initialStatus': 'Initial status',
+  'form.deadline': 'Deadline (optional)',
   'form.plainHint': 'New tasks stay marked Human. Run from the details to submit an execution request and mark the task as Agent.',
   'form.create': 'Create',
   'form.noTaskId': 'task_create did not return a task ID',
@@ -408,7 +446,7 @@ const en: Record<MessageKey, string> = {
   'banner.note': 'A connection error ≠ a task failure; already executed actions are unaffected',
 
   'add.closeAria': 'Close the add repository form',
-  'add.repoPathLabel': 'Absolute repository path *',
+  'add.repoPathLabel': 'Absolute project directory path *',
   'add.repoPathPlaceholder': 'e.g. /Users/you/projects/my-repo',
   'add.browse': 'Browse…',
   'add.browseTitle': 'Browse local directories to pick a Git repository',
@@ -422,7 +460,8 @@ const en: Record<MessageKey, string> = {
   'add.baseTitle':
     'With commits it must be an existing local branch; for empty repositories it must match the current branch',
   'add.hint':
-    'Register an existing local Git repository as a new board; subdirectories, symlinks and worktrees are resolved to the main repository. Registering the same repository again just switches to its existing board. Repositories without commits can be added too; the first commit is only required before creating a task worktree.',
+    'Register a local project directory as a new board; Git subdirectories, symlinks and worktrees are resolved to the main repository. Plain non-Git directories can be added too (Git branch and worktree features stay unavailable until Git is initialized). Registering the same repository or directory again just switches to its existing board. Repositories without commits can be added; the first commit is only required before creating a task worktree.',
+  'add.nonGitHint': 'Detected as a non-Git directory: it will be registered by project directory; Git branch management and worktree creation are unavailable, while tasks still execute and review in that directory.',
   'add.registering': 'Registering…',
   'add.submit': 'Add',
 
@@ -436,9 +475,11 @@ const en: Record<MessageKey, string> = {
   'picker.noSubdirs': 'No visible subdirectories in this folder',
   'picker.subdirsAria': 'Subdirectory list',
   'picker.useRepo': 'Use repository {path} (base: {branch})',
+  'picker.useCurrent': 'Use current directory {path}',
+  'picker.useCurrentTitle': 'Add the current directory as a project (non-Git directories work too)',
   'picker.enter': 'Enter {name}',
   'picker.hint':
-    'Click a Git repository to select it; click a regular folder to descend. Hidden directories are not shown.',
+    'Click a Git repository to select it; click a regular folder to descend, or use the bottom button to add the current directory as a project. Hidden directories are not shown.',
 
   'toast.mcpOk': '{call} OK',
   'toast.replyPromptLabel': 'Reply to the agent (full text is preserved)',
@@ -538,8 +579,9 @@ const EVENT_KEYS: Record<string, MessageKey> = {
   execution_rejected: 'native.event.rejected',
   execution_blocked: 'native.event.blocked',
   execution_recovered: 'native.event.recovered',
-  execution_recovery_requested: 'native.event.recoveryRequested',
-  execution_recovery_checked: 'native.event.recoveryChecked',
+  review_round: 'native.event.reviewRound',
+  review_updated: 'native.event.reviewUpdated',
+  execution_external_bound: 'native.event.externalBound',
 };
 
 const EXEC_KEYS: Record<string, MessageKey> = {

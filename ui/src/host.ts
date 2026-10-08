@@ -1,4 +1,4 @@
-import type { ExecutionBinding, ExecutionRequest, ExecutionResult, WorkItem, WorkspaceMode } from './mcp/types';
+import type { ExecutionBinding, ExecutionRequest, ExecutionResult, ReviewBinding, TaskReview, WorkItem, WorkspaceMode } from './mcp/types';
 import { translate } from './i18n/messages';
 
 export interface HostInfo {
@@ -38,10 +38,33 @@ export interface ExecutionHost {
 }
 
 export type ExecutionAction = 'start' | 'reply' | 'continue' | 'retry';
+export type ReviewAction = 'review-start' | 'review-continue' | 'review-fix';
 export type HostBlockReason =
   | 'disconnected' | 'unknown' | 'context'
   | 'message' | 'open' | 'workspace' | 'archived'
-  | 'busy' | 'binding' | 'repo' | 'stop' | 'selection' | 'done' | 'blocked';
+  | 'busy' | 'binding' | 'repo' | 'stop' | 'selection' | 'done' | 'blocked'
+  | 'gitUnavailable' | 'reviewWorkspace' | 'reviewConflict' | 'reviewBinding' | 'reviewBusy' | 'reviewBlocked' | 'reviewUnsupported';
+
+/**
+ * 看板能力视图（board_list 结果的字段子集）：projectDir 表达项目目录身份，
+ * repoKey 表达当前 Git 能力。展示口径来自最近一次能力刷新；分支/worktree
+ * 操作的最终准入仍由服务端在执行前核验。
+ */
+export interface BoardCapability {
+  repo?: string | null;
+  projectDir?: string | null;
+  repoKey?: string | null;
+}
+
+/** 无项目看板：既没有项目目录也没有仓库（default 看板未绑定仓库时） */
+export function isProjectlessBoard(board: BoardCapability | null | undefined): boolean {
+  return !board?.projectDir && !board?.repo;
+}
+
+/** 看板当前具备 Git 能力（以最近能力刷新持久化的 repoKey 为准） */
+export function boardGitCapable(board: BoardCapability | null | undefined): boolean {
+  return Boolean(board?.repoKey);
+}
 
 export const HOST_REQUEST_TIMEOUT_MS = 15_000;
 
@@ -84,20 +107,68 @@ export function hostBlockReason(snapshot: HostSnapshot): HostBlockReason | null 
 }
 
 export type ExecutionTask = Pick<WorkItem, 'id' | 'boardId' | 'execution'> &
-  Partial<Pick<WorkItem, 'status' | 'archivedAt' | 'worktreePath' | 'executionBinding' | 'executionRequests'>>;
+  Partial<Pick<WorkItem, 'status' | 'archivedAt' | 'worktreePath' | 'executionBinding' | 'executionRequests'
+    | 'review' | 'reviewBinding' | 'reviewExecution' | 'externalExecutionSession'>>;
 
 export function currentExecutionRequest(task: ExecutionTask): ExecutionRequest | undefined {
   return task.executionRequests?.find((request) => request.runId === task.execution.runId);
 }
 
+/** 当前验收代次的请求（review purpose，runId 对齐 reviewExecution） */
+export function currentReviewRequest(task: ExecutionTask): ExecutionRequest | undefined {
+  const runId = task.reviewExecution?.runId;
+  if (!runId) return undefined;
+  return task.executionRequests?.find((request) => request.purpose === 'review' && request.runId === runId);
+}
+
+/** review 惰性缺省视图：仅用于展示判断，与服务端读取口径一致 */
+export function reviewStatusOf(task: ExecutionTask): TaskReview['status'] {
+  if (task.status !== 'review') return task.review?.status ?? 'pending';
+  return task.review?.status ?? 'pending';
+}
+
+export function hasReviewBinding(binding?: ReviewBinding): binding is ReviewBinding {
+  return binding?.provider === 'codex-desktop' && identifier(binding.threadId) &&
+    !/^(sess-|creating|pending)/i.test(binding.threadId) && identifier(binding.hostId) &&
+    typeof binding.workspacePath === 'string' && binding.workspacePath.startsWith('/');
+}
+
 export function executionRecoverySource(task: ExecutionTask): ExecutionRequest | undefined {
   if (hasRealBinding(task.executionBinding)) return undefined;
-  return [...(task.executionRequests ?? [])].reverse().find((request) => request.status === 'cancelled' && request.result);
+  return [...(task.executionRequests ?? [])].reverse().find((request) => request.purpose !== 'review' &&
+    ['cancelled', 'rejected'].includes(request.status) && request.result);
+}
+
+/** 明确分发失败后保留的验收会话，只恢复当前验收代次，避免误用历史轮次。 */
+export function reviewRecoverySource(task: ExecutionTask): ExecutionRequest | undefined {
+  const request = currentReviewRequest(task);
+  return request?.status === 'rejected' && request.result && !request.startedAt && !request.reports?.length
+    ? request : undefined;
 }
 
 export function executionPending(task: ExecutionTask): boolean {
   const request = currentExecutionRequest(task);
   return Boolean(request && ['pending', 'delivered', 'claimed', 'created', 'bound', 'uncertain'].includes(request.status));
+}
+
+/** 验收请求仍在途（等待宿主回执） */
+export function reviewPending(task: ExecutionTask): boolean {
+  const request = currentReviewRequest(task);
+  return Boolean(request && ['pending', 'delivered', 'claimed', 'created', 'bound', 'uncertain'].includes(request.status));
+}
+
+/**
+ * 客户端可判定的实现工作区解析结果（服务端在请求/绑定时做权威校验）：
+ * ok = 唯一来源；required = 无来源；conflict = 多个互不相同的来源。
+ * board.repo 不参与来源猜测。
+ */
+export function resolveReviewWorkspacePreview(task: ExecutionTask): { ok: true; workspacePath: string } | { ok: false; reason: 'reviewWorkspace' | 'reviewConflict' } {
+  const sources = [task.executionBinding?.workspacePath, task.externalExecutionSession?.workspacePath, task.worktreePath]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+  if (sources.length === 0) return { ok: false, reason: 'reviewWorkspace' };
+  const distinct = new Set(sources.map((value) => value.replace(/\/+$/, '')));
+  if (distinct.size > 1) return { ok: false, reason: 'reviewConflict' };
+  return { ok: true, workspacePath: sources[0] };
 }
 
 export function hasRealBinding(binding?: ExecutionBinding): binding is ExecutionBinding {
@@ -107,9 +178,10 @@ export function hasRealBinding(binding?: ExecutionBinding): binding is Execution
 }
 
 /** created 已持久化的真实结果可用于打开聊天，尚不代表工作区已通过绑定核验。 */
-export function executionTarget(task: ExecutionTask): ExecutionResult | undefined {
-  if (hasRealBinding(task.executionBinding)) return task.executionBinding;
-  const result = currentExecutionRequest(task)?.result;
+export function executionTarget(task: ExecutionTask, purpose: 'implementation' | 'review' = 'implementation'): ExecutionResult | undefined {
+  const binding = purpose === 'review' ? task.reviewBinding : task.executionBinding;
+  if (hasRealBinding(binding)) return binding;
+  const result = (purpose === 'review' ? currentReviewRequest(task) : currentExecutionRequest(task))?.result;
   return result && identifier(result.threadId) && identifier(result.hostId) &&
     typeof result.workspacePath === 'string' && result.workspacePath.startsWith('/') ? result : undefined;
 }
@@ -118,10 +190,15 @@ export function executionBlocked(task: ExecutionTask): boolean {
   return currentExecutionRequest(task)?.status === 'blocked';
 }
 
+/** 仅当前验收执行及其代次的请求参与阻塞判断，历史阻塞不影响已结束的本轮。 */
+export function reviewExecutionBlocked(task: ExecutionTask): boolean {
+  return task.reviewExecution?.state === 'blocked' || currentReviewRequest(task)?.status === 'blocked';
+}
+
 export function executionBlockReason(
   snapshot: HostSnapshot,
   task: ExecutionTask,
-  repo: string | null | undefined,
+  board: BoardCapability | null | undefined,
   action: ExecutionAction,
   workspaceMode?: WorkspaceMode,
 ): HostBlockReason | null {
@@ -130,9 +207,15 @@ export function executionBlockReason(
   const hostReason = hostBlockReason(snapshot);
   if (hostReason) return hostReason;
   if (!task.id || !task.boardId || (snapshot.scope?.mode === 'project' && snapshot.scope.lockedBoardId !== task.boardId)) return 'context';
-  if (!repo?.startsWith('/')) return 'repo';
-  if (snapshot.scope?.mode === 'project' && snapshot.scope.repoRoot !== repo) return 'context';
+  // 看板信息未加载时不能判定能力：保持原有仓库守卫语义
+  if (!board) return 'repo';
+  const projectless = isProjectlessBoard(board);
+  const boardDir = board.repo ?? board.projectDir ?? null;
+  // 无项目看板走 projectless；项目看板必须锚定项目目录/仓库根
+  if (projectless ? workspaceMode === 'project' || workspaceMode === 'worktree' : !boardDir?.startsWith('/')) return 'repo';
+  if (!projectless && snapshot.scope?.mode === 'project' && snapshot.scope.repoRoot !== boardDir) return 'context';
   if (!snapshot.capabilities.message?.text) return 'message';
+  if (reviewExecutionBlocked(task)) return 'reviewBlocked';
   if (executionPending(task) || (task.execution.runId && task.execution.state === 'running')) return 'busy';
   if (executionBlocked(task)) {
     if (action !== 'continue') return 'blocked';
@@ -144,10 +227,16 @@ export function executionBlockReason(
     if (!workspaceMode) return 'selection';
     if (task.worktreePath && workspaceMode !== 'existing') return 'workspace';
     if (!task.worktreePath && workspaceMode === 'existing') return 'workspace';
+    // 无项目看板只接受 projectless；非 Git 项目不接受 worktree（Git 项目保持原逻辑）
+    if (projectless && workspaceMode !== 'projectless') return 'workspace';
+    if (!projectless && workspaceMode === 'projectless') return 'workspace';
+    if (workspaceMode === 'worktree' && !boardGitCapable(board)) return 'gitUnavailable';
   } else {
     if (!hasRealBinding(task.executionBinding)) return 'binding';
     const original = task.executionRequests?.find((request) => request.result?.threadId === task.executionBinding?.threadId);
-    const expectedMode = original?.workspaceMode ?? (task.executionBinding.workspaceOwner === 'user' ? 'project' : 'existing');
+    const expectedMode = original?.workspaceMode ??
+      (task.executionBinding.workspaceOwner === 'user' ? 'project'
+        : task.executionBinding.workspaceOwner === undefined ? 'projectless' : 'existing');
     if (workspaceMode !== expectedMode) return 'workspace';
   }
   const recovery = executionRecoverySource(task);
@@ -155,12 +244,47 @@ export function executionBlockReason(
   return null;
 }
 
-export function openThreadBlockReason(snapshot: HostSnapshot, task: ExecutionTask): HostBlockReason | null {
+export function openThreadBlockReason(snapshot: HostSnapshot, task: ExecutionTask, purpose: 'implementation' | 'review' = 'implementation'): HostBlockReason | null {
   const reason = hostBlockReason(snapshot);
   if (reason) return reason;
   if (snapshot.scope?.mode === 'project' && snapshot.scope.lockedBoardId !== task.boardId) return 'context';
-  if (!executionTarget(task)) return 'binding';
+  if (!executionTarget(task, purpose)) return 'binding';
   if (!snapshot.capabilities.openLinks) return 'open';
+  return null;
+}
+
+/**
+ * Review 执行入口守卫：无项目看板不参与验收；工作区解析（客户端预判，
+ * 服务端权威校验）、验收会话绑定与在途请求；继续修改（fix）走实现会话口径。
+ */
+export function reviewBlockReason(
+  snapshot: HostSnapshot,
+  task: ExecutionTask,
+  action: ReviewAction,
+  board?: BoardCapability | null,
+): HostBlockReason | null {
+  if (task.archivedAt) return 'archived';
+  if (task.status !== 'review') return 'context';
+  const hostReason = hostBlockReason(snapshot);
+  if (hostReason) return hostReason;
+  if (!task.id || !task.boardId || (snapshot.scope?.mode === 'project' && snapshot.scope.lockedBoardId !== task.boardId)) return 'context';
+  // 看板信息可用时，无项目看板任务不参与验收流转；信息未加载时交由服务端权威拒绝
+  if (board && isProjectlessBoard(board)) return 'reviewUnsupported';
+  if (!snapshot.capabilities.message?.text) return 'message';
+  if (action === 'review-fix') {
+    if (reviewExecutionBlocked(task)) return 'reviewBlocked';
+    // 实现会话运行中或等待输入时禁止再派修改：waiting 表示会话已请求用户输入，需先处理
+    if (executionPending(task) ||
+      (task.execution.runId !== undefined && ['running', 'waiting'].includes(task.execution.state))) return 'busy';
+    if (!hasRealBinding(task.executionBinding)) return 'binding';
+    return null;
+  }
+  const workspace = resolveReviewWorkspacePreview(task);
+  if (!workspace.ok) return workspace.reason;
+  if (reviewPending(task) || task.reviewExecution?.state === 'running') return 'reviewBusy';
+  if (action === 'review-start' && hasReviewBinding(task.reviewBinding) &&
+    !(reviewStatusOf(task) === 'pending' && reviewRecoverySource(task))) return 'reviewBinding';
+  if (action === 'review-continue' && !hasReviewBinding(task.reviewBinding)) return 'reviewBinding';
   return null;
 }
 

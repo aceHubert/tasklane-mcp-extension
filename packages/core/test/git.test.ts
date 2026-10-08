@@ -185,6 +185,36 @@ test('仓库身份校验仍拒绝相对路径、不存在路径、文件和裸�
   }
 });
 
+test('probeRepo 分类不依赖 git 本地化消息：非 Git 目录返回 null，Git 仓库返回身份，裸仓库与坏路径仍拒绝', async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'tasklane-probe-'));
+  const repo = makeRepo();
+  t.after(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  });
+  const bare = path.join(dir, 'bare.git');
+  git(dir, ['init', '--bare', '-q', bare]);
+  const svc = new GitService(true);
+  // 模拟中文环境的本地化 git 消息：分类必须与 locale 无关（探针内强制 C locale 匹配英文 stderr）
+  const prevLcAll = process.env.LC_ALL;
+  const prevLang = process.env.LANG;
+  process.env.LC_ALL = 'zh_CN.UTF-8';
+  process.env.LANG = 'zh_CN.UTF-8';
+  try {
+    assert.equal(await svc.probeRepo(dir), null);
+    const identity = await svc.probeRepo(repo);
+    assert.equal(identity?.root, realpathSync(repo));
+    await assert.rejects(svc.probeRepo(bare), (err: BoardError) => err.code === 'VALIDATION');
+    await assert.rejects(
+      svc.probeRepo(path.join(dir, 'missing')),
+      (err: BoardError) => err.code === 'VALIDATION' && /路径不存在/.test(err.message),
+    );
+  } finally {
+    if (prevLcAll === undefined) delete process.env.LC_ALL; else process.env.LC_ALL = prevLcAll;
+    if (prevLang === undefined) delete process.env.LANG; else process.env.LANG = prevLang;
+  }
+});
+
 test('继承的 GIT_DIR/GIT_WORK_TREE 不改写仓库路由', async () => {
   const repoA = makeRepo();
   const repoB = makeRepo();

@@ -12,7 +12,7 @@ import path from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { BoardEngine, GitService, JsonFileBoardStore, defaultStorePath } from "@tasklane/core";
 import { createServer } from "../../mcp/dist/src/server.js";
-import { registerKanbanWidget } from "./widget.mjs";
+import { REPORT_WIDGET_URI, registerKanbanWidget, reportWidgetData } from "./widget.mjs";
 
 // bundle 部署后：server.mjs 与 assets/、kanban-widget.html 同在插件根目录
 const pluginDir = path.dirname(fileURLToPath(import.meta.url));
@@ -36,25 +36,42 @@ async function main() {
   const git = new GitService(process.env.TASKLANE_GIT !== "off");
   const engine = new BoardEngine(store, git);
 
+  // apps 选项：task_execution_report 成功结果附加报告卡片字段（会话内出卡并聚焦任务）。
+  // serverRef 在 createServer 返回后才有值，闭包经引用读取实际握手客户端；
+  // 字段解析失败返回 null，保持纯回执结果，不阻塞执行回报。
+  let serverRef = null;
   const server = createServer(engine, {
-    serverInfo: { name: "tasklane", version: "0.3.14", icons: sidebarIcons },
+    serverInfo: { name: "tasklane", version: "0.3.20", icons: sidebarIcons },
     instructions:
       "tasklane MCP server: a task board shared by the user and the agent. " +
       "Use open_tasklane to open (or reuse) the native board MCP App in the Codex content panel. " +
       "In project chats, pass the active workspace as absolute projectDir; use empty arguments only for the global board. " +
       "Do not start a localhost bridge or open a browser URL unless the user explicitly asks for browser mode. " +
       "If open_tasklane fails, report the cause without changing boards or creating Git commits. Manage tasks through " +
-      "board_list / task_list / task_get / task_create / task_update / task_move / task_assign; " +
-      "task_assign remains a metadata tool and never creates a chat, starts/stops an agent or creates a worktree. " +
+      "board_list / task_list / task_get / task_create / task_update / task_move; task_update dispatches by action: " +
+      "action=assign is a metadata tool that never creates a chat, starts/stops an agent or creates a worktree, and action=review records review verdicts. " +
       "The UI does not expose manual assignment; new execution requests atomically mark the task as agent without proving running. " +
       "For explicit native execution requests, follow the tasklane native-execution skill: reread task_get and board_list, " +
       "claim the persisted request before native chat creation, record phase=created then phase=bound, " +
-      "and report actual execution with task_execution_report matching threadId, hostId and runId. " +
+      "and report actual execution with task_execution action=report matching threadId, hostId and runId. " +
+      "Projectless boards (no repo) start tasks with workspaceMode=projectless: create_thread uses a projectless target with no projectId, the bind omits workspace fields, and such tasks skip the review workflow. " +
+      "Non-Git project boards execute in their directory via the project mode; worktree requests are rejected there. " +
       "Message delivery and task_move are not proof of execution. Never use task_update(execution). " +
       "Connected Codex panels submit task requests without a separate verification chat. The receiving Agent confirms its real host/thread when claiming, " +
       "returns the new task chat identifiers immediately, persists created then bound before sending the task body, and reports explicit failures. " +
       "Execution is disabled outside Codex; there is no CLI or background fallback and no reliable Stop interface.",
+    apps: {
+      resourceUri: REPORT_WIDGET_URI,
+      widgetDataFor: (result) =>
+        reportWidgetData({
+          result,
+          boardHome: storePath,
+          store,
+          clientVersion: () => serverRef?.server?.getClientVersion(),
+        }),
+    },
   });
+  serverRef = server;
   registerKanbanWidget(server, { widgetPath, boardHome: storePath, engine });
 
   const transport = new StdioServerTransport();

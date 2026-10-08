@@ -240,3 +240,13 @@ export function ExportIcon(p: IconProps) {
     </Svg>
   );
 }
+
+/** 截止时间：表盘 + 指针（任务卡片与详情的 deadline 标识） */
+export function ClockIcon(p: IconProps) {
+  return (
+    <Svg {...p}>
+      <circle cx={12} cy={12} r={9} />
+      <path d="M12 7v5l3 2" />
+    </Svg>
+  );
+}

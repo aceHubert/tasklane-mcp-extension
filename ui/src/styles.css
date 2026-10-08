@@ -1,3 +1,15 @@
+/* 会话报告的尺寸随内容变化，不采用完整看板的固定视口和底部安全区。 */
+.report-card-frame { width: 100%; padding: 12px; min-height: 0; }
+html[data-report-card], html[data-report-card] body, html[data-report-card] #root { height: auto; min-height: 0; }
+.execution-report-card { padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--fg); }
+.report-card-label { margin-bottom: 12px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.report-card-title { margin: 10px 0; font-size: 17px; line-height: 1.45; overflow-wrap: anywhere; }
+.report-card-activity { margin: 8px 0 14px; color: var(--muted); font-size: 13px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.report-card-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
+.report-card-footer time { color: var(--faint); font-size: 11px; }
+.report-card-error { margin: 12px 0 0; color: var(--err); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.report-card-connection { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
+
 /* ============ 主题变量（对齐 TaskLane 侧栏设计稿：深色为深空灰中性灰阶 / 强调色为 logo 亮蓝 #00a8b8 / 紫 Agent） ============ */
 :root {
   /* 原生控件（select 弹层/滚动条等）跟随主题配色，否则深色下弹出层是白底浅字 */
@@ -350,6 +362,9 @@ input:disabled, select:disabled, textarea:disabled {
 .exec-chip.wait { color: var(--warn); background: var(--warn-bg); box-shadow: inset 0 0 0 1px var(--warn-border); font-weight: 600; }
 .exec-chip.fail { color: var(--err); background: var(--err-bg); box-shadow: inset 0 0 0 1px var(--err-border); font-weight: 600; }
 .exec-chip.done { color: var(--ok); background: var(--ok-bg); box-shadow: inset 0 0 0 1px var(--ok-border); }
+/* 截止时间 chip：等宽数字避免跳动；已过期用错误色提示 */
+.exec-chip.deadline-chip { font-variant-numeric: tabular-nums; }
+.exec-chip.deadline-chip.overdue { color: var(--err); background: var(--err-bg); box-shadow: inset 0 0 0 1px var(--err-border); font-weight: 600; }
 .exec-activity { color: var(--muted); }
 .exec-ago { color: var(--faint); font-size: 11px; margin-left: auto; }
 /* Agent 执行中：绿色脉冲点（设计稿 .pulse-dot 外扩光圈） */
@@ -412,6 +427,9 @@ input:disabled, select:disabled, textarea:disabled {
 .field { display: grid; gap: 4px; }
 .field-label { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
 .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* 详情截止时间行：输入框与清除按钮一行（清除按钮不包进 label，避免点击连带唤起选择器） */
+.deadline-row { display: flex; gap: 6px; align-items: center; }
+.deadline-row input { flex: 1; min-width: 0; }
 
 .sec {
   background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
@@ -681,6 +699,29 @@ input:disabled, select:disabled, textarea:disabled {
   border: 1px dashed var(--border);
 }
 .status-pill.archived { color: var(--fg-muted); background: var(--bg-inset); border-color: var(--border); }
+/* Review 工作流状态（native.review.status.*）：与业务列状态分离 */
+.review-pill.pending { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-border); }
+.review-pill.reviewing { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-border); }
+.review-pill.changes_requested { color: var(--err); background: var(--err-bg); border-color: var(--err-border); }
+.review-pill.fixing { color: var(--sky); background: var(--sky-bg); border-color: var(--sky-border); }
+.review-pill.recheck_pending { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-border); }
+.review-pill.approved { color: var(--ok); background: var(--ok-bg); border-color: var(--ok-border); }
+/* 验收轮次结论默认收起到两行；原生 details 负责展开/折叠状态与可访问性。 */
+.review-sec .timeline.review-rounds .review-conclusion { flex: 1; min-width: 0; }
+.review-conclusion > summary {
+  display: grid; gap: 2px; min-width: 0; cursor: pointer; list-style: none;
+}
+.review-conclusion > summary::-webkit-details-marker { display: none; }
+.review-conclusion-text {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+  color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0;
+}
+.review-conclusion[open] .review-conclusion-text {
+  display: block; overflow: visible; -webkit-line-clamp: unset;
+}
+.review-conclusion-toggle { color: var(--accent); font-size: 11px; width: max-content; }
+.review-conclusion[open] .when-collapsed { display: none; }
+.review-conclusion:not([open]) .when-expanded { display: none; }
 .exec-chip.archived { color: var(--fg-muted); background: var(--bg-inset); box-shadow: inset 0 0 0 1px var(--border); }
 
 /* 已归档视图（模态）：搜索 + 归档时间倒序列表 */

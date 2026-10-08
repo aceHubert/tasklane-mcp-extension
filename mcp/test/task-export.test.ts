@@ -68,7 +68,7 @@ test('tool 契约：task_export 收窄 scope、切换语言并按 boardId 路由
   await assert.rejects(engine.exportTasks({ lang: 'fr' as ExportLang }), rejectsCode('VALIDATION'));
   assert.equal(active.task.status, 'backlog');
 
-  store.registerBoard({ repoKey: '/repos/other/.git', repo: '/repos/other', name: '其它看板', baseBranch: 'main' });
+  store.registerBoard({ repoKey: '/repos/other/.git', repo: '/repos/other', projectDir: '/repos/other', name: '其它看板', baseBranch: 'main' });
   await assert.rejects(engine.exportTasks({}), rejectsCode('VALIDATION'));
   const scoped = await engine.exportTasks({ boardId: active.task.boardId });
   assert.equal(scoped.boardId, active.task.boardId);

@@ -6,17 +6,18 @@ import {
   BoardError,
   type Assignee,
   type BindExecutionInput,
+  type BindExternalSessionInput,
   type BoardEngine,
   type ClaimExecutionInput,
   type ExecutionDeliveryInput,
-  type ExecutionRecoveryInput,
-  type RequestExecutionRecoveryInput,
+  type ReleaseExecutionInput,
   type ExecutionState,
   type ExportTasksInput,
   type ModelCatalogService,
   type Priority,
   type ReportExecutionInput,
   type RequestExecutionInput,
+  type ReviewUpdateInput,
   type TaskStatus,
 } from '@tasklane/core';
 
@@ -27,7 +28,8 @@ import {
  * 读取/修改省略 boardId 时用任务自身归属，传入错误归属直接拒绝。
  */
 export async function boardList(engine: BoardEngine) {
-  return { boards: engine.boardList() };
+  // 节流触发 Git 能力刷新：项目打开/切换/看板轮询时按目录当前状态更新能力
+  return { boards: await engine.listBoardsWithRefresh() };
 }
 
 export async function boardCreate(
@@ -62,24 +64,67 @@ export async function taskCreate(
     description?: string;
     priority?: Priority;
     status?: TaskStatus;
+    deadline?: string;
   },
 ) {
   return { task: await engine.createTask(args) };
 }
 
-export async function taskUpdate(
-  engine: BoardEngine,
-  args: {
-    id: string;
-    boardId?: string;
-    title?: string;
-    description?: string;
-    priority?: Priority;
-    execution?: { state?: ExecutionState; activity?: string };
-  },
-) {
-  const { id, boardId, ...rest } = args;
-  return { task: await engine.updateTask({ id, boardId, ...rest }) };
+/**
+ * task_update 复合入参（action 分发）：
+ * - update：字段编辑（原 task_update）
+ * - assign：指派负责人（原 task_assign）
+ * - review：验收工作流状态 CAS 更新（原 task_review_update）
+ *
+ * 扁平结构：zod schema 是 strict object（superRefine 会破坏 SDK 的 schema 公示），
+ * 分支必填字段在本分发器入口校验，业务校验全部由引擎保留。
+ */
+export interface TaskUpdateActionInput {
+  action: 'update' | 'assign' | 'review';
+  id: string;
+  boardId?: string;
+  title?: string;
+  description?: string;
+  priority?: Priority;
+  deadline?: string | null;
+  execution?: { state?: ExecutionState; activity?: string };
+  assignee?: Assignee;
+  expectedRevision?: number;
+  status?: ReviewUpdateInput['status'];
+  conclusion?: string;
+  actor?: ReviewUpdateInput['actor'];
+}
+
+// 重载让调用点按 action 精确窄化返回类型（各分支返回形状不同）。
+export function taskUpdate(engine: BoardEngine, args: TaskUpdateActionInput & { action: 'update' }): Promise<{ task: Awaited<ReturnType<BoardEngine['updateTask']>> }>;
+export function taskUpdate(engine: BoardEngine, args: TaskUpdateActionInput & { action: 'assign' }): Promise<{ task: Awaited<ReturnType<BoardEngine['assignTask']>> }>;
+export function taskUpdate(engine: BoardEngine, args: TaskUpdateActionInput & { action: 'review' }): Promise<Awaited<ReturnType<BoardEngine['updateReview']>>>;
+export async function taskUpdate(engine: BoardEngine, args: TaskUpdateActionInput) {
+  const need = (key: keyof TaskUpdateActionInput, value: unknown) => {
+    if (value === undefined) throw new BoardError('VALIDATION', `action=${args.action} 缺少必填字段 ${key}`);
+  };
+  switch (args.action) {
+    case 'update': {
+      const { action: _action, id, boardId, ...rest } = args;
+      return { task: await engine.updateTask({ id, boardId, ...rest }) };
+    }
+    case 'assign':
+      need('assignee', args.assignee);
+      return { task: await engine.assignTask(args.id, args.assignee as Assignee, args.boardId) };
+    case 'review': {
+      need('boardId', args.boardId);
+      need('expectedRevision', args.expectedRevision);
+      need('status', args.status);
+      return engine.updateReview({
+        id: args.id,
+        boardId: args.boardId as string,
+        expectedRevision: args.expectedRevision as number,
+        status: args.status as ReviewUpdateInput['status'],
+        ...(args.conclusion !== undefined ? { conclusion: args.conclusion } : {}),
+        ...(args.actor !== undefined ? { actor: args.actor } : {}),
+      });
+    }
+  }
 }
 
 export async function taskMove(
@@ -89,39 +134,137 @@ export async function taskMove(
   return { task: await engine.moveTask(args.id, args.status, args.boardId) };
 }
 
-export async function taskAssign(
-  engine: BoardEngine,
-  args: { id: string; assignee: Assignee; boardId?: string },
-) {
-  return { task: await engine.assignTask(args.id, args.assignee, args.boardId) };
+/**
+ * task_execution 复合入参（action 分发）：六个分支与原六个工具一一对应，
+ * 校验全部由对应 engine 方法保留。request 分支的子动作（start/reply/continue/retry）
+ * 在 MCP 层命名为 requestAction，避免与外层 action 判别字段冲突。
+ * 扁平结构（同 TaskUpdateActionInput 的原因），分支必填在分发器入口校验。
+ */
+export interface TaskExecutionActionInput {
+  action: 'request' | 'delivery' | 'claim' | 'bind' | 'external_bind' | 'report';
+  id: string;
+  boardId: string;
+  requestId?: string;
+  runId?: string;
+  requestAction?: RequestExecutionInput['action'];
+  workspaceMode?: RequestExecutionInput['workspaceMode'];
+  purpose?: RequestExecutionInput['purpose'];
+  hostId?: string;
+  receiverThreadId?: string;
+  message?: string;
+  model?: string;
+  status?: ExecutionDeliveryInput['status'];
+  error?: string;
+  claimId?: string;
+  phase?: BindExecutionInput['phase'];
+  threadId?: string;
+  workspacePath?: string;
+  workspaceOwner?: BindExecutionInput['workspaceOwner'] | BindExternalSessionInput['workspaceOwner'];
+  branch?: string;
+  provider?: string;
+  sessionId?: string;
+  force?: boolean;
+  reportId?: string;
+  state?: ReportExecutionInput['state'];
+  activity?: string;
+}
+
+// 重载让调用点按 action 精确窄化返回类型（各分支返回形状不同）。
+export function taskExecution(engine: BoardEngine, args: TaskExecutionActionInput & { action: 'request' }): Promise<Awaited<ReturnType<BoardEngine['requestExecution']>>>;
+export function taskExecution(engine: BoardEngine, args: TaskExecutionActionInput & { action: 'delivery' }): Promise<Awaited<ReturnType<BoardEngine['markExecutionDelivery']>>>;
+export function taskExecution(engine: BoardEngine, args: TaskExecutionActionInput & { action: 'claim' }): Promise<Awaited<ReturnType<BoardEngine['claimExecution']>>>;
+export function taskExecution(engine: BoardEngine, args: TaskExecutionActionInput & { action: 'bind' }): Promise<Awaited<ReturnType<BoardEngine['bindExecution']>>>;
+export function taskExecution(engine: BoardEngine, args: TaskExecutionActionInput & { action: 'external_bind' }): Promise<Awaited<ReturnType<BoardEngine['bindExternalSession']>>>;
+export function taskExecution(engine: BoardEngine, args: TaskExecutionActionInput & { action: 'report' }): Promise<Awaited<ReturnType<BoardEngine['reportExecution']>>>;
+export async function taskExecution(engine: BoardEngine, args: TaskExecutionActionInput) {
+  const need = (key: keyof TaskExecutionActionInput, value: unknown) => {
+    if (value === undefined) throw new BoardError('VALIDATION', `action=${args.action} 缺少必填字段 ${key}`);
+  };
+  switch (args.action) {
+    case 'request': {
+      need('requestId', args.requestId);
+      need('requestAction', args.requestAction);
+      need('workspaceMode', args.workspaceMode);
+      const { action: _action, requestAction, requestId, workspaceMode, purpose, hostId, receiverThreadId, message, model } = args;
+      return engine.requestExecution({
+        id: args.id, boardId: args.boardId, requestId: requestId as string, action: requestAction as RequestExecutionInput['action'],
+        workspaceMode: workspaceMode as RequestExecutionInput['workspaceMode'],
+        ...(purpose !== undefined ? { purpose } : {}), ...(hostId !== undefined ? { hostId } : {}),
+        ...(receiverThreadId !== undefined ? { receiverThreadId } : {}), ...(message !== undefined ? { message } : {}),
+        ...(model !== undefined ? { model } : {}),
+      });
+    }
+    case 'delivery': {
+      need('requestId', args.requestId);
+      need('runId', args.runId);
+      need('status', args.status);
+      return engine.markExecutionDelivery({
+        id: args.id, boardId: args.boardId, requestId: args.requestId as string, runId: args.runId as string,
+        status: args.status as ExecutionDeliveryInput['status'],
+        ...(args.error !== undefined ? { error: args.error } : {}), ...(args.claimId !== undefined ? { claimId: args.claimId } : {}),
+      });
+    }
+    case 'claim': {
+      need('requestId', args.requestId);
+      need('runId', args.runId);
+      need('claimId', args.claimId);
+      return engine.claimExecution({
+        id: args.id, boardId: args.boardId, requestId: args.requestId as string, runId: args.runId as string, claimId: args.claimId as string,
+        ...(args.hostId !== undefined ? { hostId: args.hostId } : {}),
+        ...(args.receiverThreadId !== undefined ? { receiverThreadId: args.receiverThreadId } : {}),
+      });
+    }
+    case 'bind': {
+      need('requestId', args.requestId);
+      need('runId', args.runId);
+      need('claimId', args.claimId);
+      need('phase', args.phase);
+      need('threadId', args.threadId);
+      need('hostId', args.hostId);
+      return engine.bindExecution({
+        id: args.id, boardId: args.boardId, requestId: args.requestId as string, runId: args.runId as string,
+        claimId: args.claimId as string, phase: args.phase as BindExecutionInput['phase'],
+        threadId: args.threadId as string, hostId: args.hostId as string,
+        ...(args.workspacePath !== undefined ? { workspacePath: args.workspacePath } : {}),
+        ...(args.workspaceOwner !== undefined ? { workspaceOwner: args.workspaceOwner as BindExecutionInput['workspaceOwner'] } : {}),
+        ...(args.branch !== undefined ? { branch: args.branch } : {}),
+      });
+    }
+    case 'external_bind': {
+      need('provider', args.provider);
+      need('sessionId', args.sessionId);
+      need('workspacePath', args.workspacePath);
+      need('workspaceOwner', args.workspaceOwner);
+      return engine.bindExternalSession({
+        id: args.id, boardId: args.boardId,
+        provider: args.provider as string, sessionId: args.sessionId as string,
+        workspacePath: args.workspacePath as string,
+        workspaceOwner: args.workspaceOwner as BindExternalSessionInput['workspaceOwner'],
+        ...(args.branch !== undefined ? { branch: args.branch } : {}),
+        ...(args.force !== undefined ? { force: args.force } : {}),
+      });
+    }
+    case 'report': {
+      need('requestId', args.requestId);
+      need('runId', args.runId);
+      need('threadId', args.threadId);
+      need('hostId', args.hostId);
+      need('reportId', args.reportId);
+      need('state', args.state);
+      return engine.reportExecution({
+        id: args.id, boardId: args.boardId, requestId: args.requestId as string, runId: args.runId as string,
+        threadId: args.threadId as string, hostId: args.hostId as string,
+        reportId: args.reportId as string, state: args.state as ReportExecutionInput['state'],
+        ...(args.activity !== undefined ? { activity: args.activity } : {}),
+      });
+    }
+  }
 }
 
 // 关联、归属、归档与 Git 校验均由核心事务负责；handler 不创建执行器或工作区。
-export async function taskExecutionRequest(engine: BoardEngine, args: RequestExecutionInput) {
-  return engine.requestExecution(args);
-}
-export async function taskExecutionRecoveryRequest(engine: BoardEngine, args: RequestExecutionRecoveryInput) {
-  return engine.requestExecutionRecovery(args);
-}
-
-export async function taskExecutionRecover(engine: BoardEngine, args: ExecutionRecoveryInput) {
-  return engine.recoverExecution(args);
-}
-
-export async function taskExecutionDelivery(engine: BoardEngine, args: ExecutionDeliveryInput) {
-  return engine.markExecutionDelivery(args);
-}
-
-export async function taskExecutionClaim(engine: BoardEngine, args: ClaimExecutionInput) {
-  return engine.claimExecution(args);
-}
-
-export async function taskExecutionBind(engine: BoardEngine, args: BindExecutionInput) {
-  return engine.bindExecution(args);
-}
-
-export async function taskExecutionReport(engine: BoardEngine, args: ReportExecutionInput) {
-  return engine.reportExecution(args);
+/** task_execution_recover（app-only）：用户在 UI 确认旧会话已结束后解除等待 */
+export async function taskExecutionRecover(engine: BoardEngine, args: ReleaseExecutionInput) {
+  return engine.releaseExecution(args);
 }
 
 /** 只读查询宿主模型目录：UI「指定模型」候选数据源，不是执行入口或兜底执行器 */

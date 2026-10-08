@@ -58,10 +58,11 @@ test('创建前阻塞显式保存原因，禁止重复启动；没有真实结�
   await assert.rejects(f.engine.requestExecution({ ...f.start, requestId: 'duplicate-start', message: '再次启动' }), rejectsCode('EXECUTION_BUSY'));
   await assert.rejects(f.engine.requestExecution(f.resume), rejectsCode('EXECUTION_CONFLICT'));
   assert.deepEqual(f.snapshot(), before);
-  const check = await f.engine.requestExecutionRecovery({ ...f.receipt, checkId: 'check-a' });
-  assert.equal(check.request.recoveryCheck!.observedStatus, 'blocked');
-  assert.equal(check.request.status, 'blocked');
-  assert.equal(new JsonFileBoardStore(f.file).getTask(f.receipt.id)!.execution.state, 'blocked');
+  // 人工解除等待（新恢复契约）：blocked 属等待态可解除，解除后请求取消、执行复位
+  const released = await f.engine.releaseExecution({ ...f.receipt, reason: '人工确认阻塞会话已结束' });
+  assert.equal(released.request.status, 'cancelled');
+  assert.equal(released.changed, true);
+  assert.equal(new JsonFileBoardStore(f.file).getTask(f.receipt.id)!.execution.state, 'assigned');
 });
 
 test('阻塞投递必须匹配原认领并有原因，不正确输入不改写任务', async () => {

@@ -22,13 +22,23 @@ import {
   registerAppResource,
   registerAppTool,
 } from "@modelcontextprotocol/ext-apps/server";
+import { reportWidgetData, reportWidgetHtml } from "./report-card.mjs";
+
+export { reportWidgetData };
 
 // 切换应用面板契约时使用新资源标识，避免宿主复用旧的 inline 页面缓存。
-export const WIDGET_URI = "ui://widget/tasklane/board-panel-v0314.html";
+// v0320：Review 续接入口与最新审核结论联动。
+export const WIDGET_URI = "ui://widget/tasklane/board-panel-v0320.html";
+// 报告使用独立资源与 inline 默认，不能复用默认自动打开的完整看板。
+export const REPORT_WIDGET_URI = "ui://widget/tasklane/report-card-v0320.html";
 
 const OPENAI_UI_META = {
   availableDisplayModes: ["fullscreen"],
   preferredDisplayMode: "fullscreen",
+};
+const REPORT_UI_META = {
+  availableDisplayModes: ["inline", "fullscreen"],
+  preferredDisplayMode: "inline",
 };
 
 const openTasklaneSchema = z.object({
@@ -55,6 +65,20 @@ const openTasklaneSchema = z.object({
  */
 export function registerKanbanWidget(server, { widgetPath, boardHome, engine }) {
   const readWidgetHtml = () => readFileSync(widgetPath, "utf8");
+
+  registerAppResource(server, "TaskLane Execution Report", REPORT_WIDGET_URI, {
+    title: "TaskLane 任务报告",
+    description: "任务执行状态卡片；仅用户点击后展开任务详情。",
+    _meta: { ui: { csp: {} }, "openai/ui": REPORT_UI_META },
+  }, async () => ({
+    contents: [{
+      uri: REPORT_WIDGET_URI,
+      mimeType: RESOURCE_MIME_TYPE,
+      // 同一 UI bundle，标记独立入口，工具上下文到达前也只显示卡片加载态。
+      text: reportWidgetHtml(readWidgetHtml()),
+      _meta: { ui: { csp: {} }, "openai/ui": REPORT_UI_META },
+    }],
+  }));
 
   registerAppResource(
     server,
@@ -150,9 +174,11 @@ export function registerKanbanWidget(server, { widgetPath, boardHome, engine }) 
       description:
         "Open the native TaskLane MCP App in the Codex content panel; no browser URL or localhost bridge is needed. " +
         "Project chats: pass the current workspace as absolute projectDir to lock " +
-        "the board to that repo (auto-registered on first open; subdirs/worktrees resolve to the main repo). " +
+        "the board to that project (auto-registered on first open; Git subdirs/worktrees resolve to the main repo, " +
+        "and plain non-Git directories register by their real path). " +
         "Repositories with no commits can open a board using their current unborn branch as baseBranch; " +
         "Git worktree creation requires an initial commit, which must be made by the user. " +
+        "Non-Git projects execute and review in their directory without Git branch or worktree features. " +
         "Global sidebar: call without arguments to manage all registered boards. " +
         "Reuse the already-open widget instead of opening another one. If opening fails, report the error; " +
         "do not fall back to a browser or a different board unless the user explicitly requests it. " +
@@ -213,8 +239,9 @@ export function registerKanbanWidget(server, { widgetPath, boardHome, engine }) 
           : "main";
 
       try {
-        // resolveProjectBoard：已登记仓库按身份直接复用（不因传入 baseBranch 无效而拒绝）；
-        // 未登记时校验工作区与基线；空仓库允许当前未提交分支，基线缺省 main。
+        // resolveProjectBoard：已登记仓库/目录按身份直接复用（不因传入 baseBranch 无效而拒绝）；
+        // 未登记时 Git 仓库校验工作区与基线（空仓库允许当前未提交分支，基线缺省 main），
+        // 非 Git 目录按真实路径注册为项目看板（repoRoot 回退 projectDir）。
         const board = await engine.resolveProjectBoard({ repo: projectDir, baseBranch });
         return widgetResult(
           {

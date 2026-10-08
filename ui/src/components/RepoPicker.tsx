@@ -160,6 +160,15 @@ export function RepoPicker({
         )}
       </div>
 
+      {/* 当前目录可直接作为项目添加（非 Git 目录同样可用） */}
+      <button
+        className="btn small use-current-dir"
+        onClick={() => onPick(cwd ?? '', '')}
+        title={t('picker.useCurrentTitle')}
+      >
+        <FolderIcon /> {t('picker.useCurrent', { path: cwd ?? '' })}
+      </button>
+
       <div className="hint-note subtle">{t('picker.hint')}</div>
     </div>
   );

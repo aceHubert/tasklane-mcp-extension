@@ -4,7 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { BoardEngine, BoardError, GitService, JsonFileBoardStore } from '@tasklane/core';
+import { createServer } from '../src/server.js';
 import * as h from '../src/handlers.js';
 
 function makeEngine(): BoardEngine {
@@ -18,6 +21,7 @@ function makeMultiEngine(): { engine: BoardEngine; boardB: string } {
   const { board } = store.registerBoard({
     repoKey: '/repos/b/.git',
     repo: '/repos/b',
+    projectDir: '/repos/b',
     name: '项目 B',
     baseBranch: 'develop',
   });
@@ -31,7 +35,7 @@ test('tool 契约：create → assign → move → get 闭环', async () => {
   assert.equal(created.task.id, 'TASK-101');
   assert.equal(created.task.priority, 'P1');
 
-  const assigned = await h.taskAssign(engine, { id: 'task-101', assignee: 'agent' });
+  const assigned = await h.taskUpdate(engine, { action: 'assign', id: 'task-101', assignee: 'agent' });
   assert.equal(assigned.task.execution.state, 'assigned');
   assert.equal(assigned.task.execution.sessionId, undefined);
   assert.equal(assigned.task.executionBinding, undefined);
@@ -68,11 +72,73 @@ test('tool 契约：task_update 拒绝无关联执行写入且整次更新无副
   const { task } = await h.taskCreate(engine, { title: 'a' });
   for (const execution of [{ state: 'waiting' as const }, { activity: 'Waiting for input' }, {}]) {
     await assert.rejects(
-      h.taskUpdate(engine, { id: task.id, title: '不得保存', execution }),
+      h.taskUpdate(engine, { action: 'update', id: task.id, title: '不得保存', execution }),
       (err: BoardError) => err.code === 'EXECUTION_REPORT_REQUIRED',
     );
     assert.deepEqual((await h.taskGet(engine, { id: task.id })).task, task);
   }
+});
+
+test('tool 契约：deadline 创建规范化、更新与 null 清除、日历日期拒绝', async () => {
+  const engine = makeEngine();
+  // 无时区标记按 UTC 解析：结果不依赖测试进程时区
+  const created = await h.taskCreate(engine, { title: 'a', deadline: '2026-10-10T18:00' });
+  assert.equal(created.task.deadline, '2026-10-10T18:00:00.000Z');
+
+  const updated = await h.taskUpdate(engine, { action: 'update', id: created.task.id, deadline: null });
+  assert.equal(updated.task.deadline, undefined);
+
+  await assert.rejects(
+    h.taskCreate(engine, { title: 'b', deadline: 'not-a-date' }),
+    (err: BoardError) => err.code === 'VALIDATION',
+  );
+  // 不存在的日历日期拒绝，不得滚动为 2026-03-02
+  await assert.rejects(
+    h.taskCreate(engine, { title: 'c', deadline: '2026-02-30T18:00:00Z' }),
+    (err: BoardError) => err.code === 'VALIDATION',
+  );
+  await assert.rejects(
+    h.taskUpdate(engine, { action: 'update', id: created.task.id, deadline: '2026-02-30' }),
+    (err: BoardError) => err.code === 'VALIDATION',
+  );
+});
+
+test('tool 契约：task_create/task_update 的 deadline 参数经 schema 校验', async (t) => {
+  const engine = makeEngine();
+  const server = createServer(engine);
+  const client = new Client({ name: 'deadline-schema-test', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  const { tools } = await client.listTools();
+  const createProps = tools.find((tool) => tool.name === 'task_create')!.inputSchema.properties as Record<string, unknown>;
+  const updateProps = tools.find((tool) => tool.name === 'task_update')!.inputSchema.properties as Record<string, unknown>;
+  assert.ok(createProps.deadline, 'task_create 应声明 deadline 参数');
+  assert.ok(updateProps.deadline, 'task_update 应声明 deadline 参数');
+
+  // 合法 deadline 走完整链路落为 UTC ISO；null 清除后字段移除
+  const created = await client.callTool({ name: 'task_create', arguments: { title: '带期限', deadline: '2026-10-10T18:00:00Z' } });
+  assert.equal(created.isError, undefined);
+  const payload = JSON.parse((created.content as { text: string }[])[0].text) as { task: { id: string; deadline?: string } };
+  assert.equal(payload.task.deadline, '2026-10-10T18:00:00.000Z');
+
+  const cleared = await client.callTool({ name: 'task_update', arguments: { action: 'update', id: payload.task.id, deadline: null } });
+  assert.equal(cleared.isError, undefined);
+  const clearedPayload = JSON.parse((cleared.content as { text: string }[])[0].text) as { task: { deadline?: string } };
+  assert.equal(clearedPayload.task.deadline, undefined);
+
+  // 非法 deadline 在 schema 层被拒绝，不触达引擎：不可解析字符串与不存在的日历日期
+  const bad = await client.callTool({ name: 'task_create', arguments: { title: '坏期限', deadline: 'not-a-date' } });
+  assert.equal(bad.isError, true);
+  assert.match(JSON.stringify(bad.content), /deadline/);
+  const badCalendar = await client.callTool({ name: 'task_create', arguments: { title: '月末溢出', deadline: '2026-02-30T18:00:00Z' } });
+  assert.equal(badCalendar.isError, true);
+  assert.match(JSON.stringify(badCalendar.content), /deadline/);
 });
 
 test('tool 契约：非法流转抛 INVALID_TRANSITION', async () => {
@@ -128,7 +194,7 @@ test('tool 契约：不存在的看板 BOARD_NOT_FOUND；错误归属 BOARD_MISM
     (err: BoardError) => err.code === 'BOARD_MISMATCH',
   );
   await assert.rejects(
-    h.taskAssign(engine, { id: task.id, assignee: 'agent', boardId: boardB }),
+    h.taskUpdate(engine, { action: 'assign', id: task.id, assignee: 'agent', boardId: boardB }),
     (err: BoardError) => err.code === 'BOARD_MISMATCH',
   );
   await assert.rejects(
@@ -136,7 +202,7 @@ test('tool 契约：不存在的看板 BOARD_NOT_FOUND；错误归属 BOARD_MISM
     (err: BoardError) => err.code === 'BOARD_MISMATCH',
   );
   await assert.rejects(
-    h.taskUpdate(engine, { id: task.id, title: 'x', boardId: boardB }),
+    h.taskUpdate(engine, { action: 'update', id: task.id, title: 'x', boardId: boardB }),
     (err: BoardError) => err.code === 'BOARD_MISMATCH',
   );
 
@@ -150,6 +216,9 @@ test('tool 契约：board_create 重复注册幂等返回已有看板', async ()
   const file = path.join(mkdtempSync(path.join(tmpdir(), 'ck-tools-')), 'board.json');
   const store = new JsonFileBoardStore(file);
   const fakeGit = new (class extends GitService {
+    override async probeRepo(repo: string) {
+      return { root: repo, repoKey: `${repo}/.git` };
+    }
     override async validateRepoForBoard(repo: string) {
       return { root: repo, repoKey: `${repo}/.git` };
     }
@@ -271,7 +340,7 @@ test('tool 契约：task_archive 非 done 返回 VALIDATION；归档任务修改
   await driveToDone(engine, task.id);
   await h.taskArchive(engine, { id: task.id });
   await assert.rejects(
-    h.taskUpdate(engine, { id: task.id, title: 'x' }),
+    h.taskUpdate(engine, { action: 'update', id: task.id, title: 'x' }),
     (err: BoardError) => err.code === 'TASK_ARCHIVED',
   );
   await assert.rejects(

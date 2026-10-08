@@ -51,10 +51,11 @@ test('无效、错误看板、无仓库、Done 和归档请求不能改变人工
     assert.equal(readFileSync(file, 'utf8'), before);
     assert.equal(engine.getTask(task.id).assignee, 'human');
   }
-  store.mutateBoard('default', (board) => ({ ...board, repo: null }));
+  // 无项目看板：repo/repoKey/projectDir 全部清空，project 模式才应被拒绝
+  store.mutateBoard('default', (board) => ({ ...board, repo: null, repoKey: null, projectDir: null }));
   await assert.rejects(engine.requestExecution(request), errorCode('VALIDATION'));
   assert.equal(engine.getTask(task.id).assignee, 'human');
-  store.mutateBoard('default', (board) => ({ ...board, repo: '/repos/a' }));
+  store.mutateBoard('default', (board) => ({ ...board, repo: '/repos/a', repoKey: '/repos/a/.git', projectDir: '/repos/a' }));
   const done = await engine.createTask({ title: '已完成', status: 'done' });
   await assert.rejects(engine.requestExecution(input(done.id)), errorCode('VALIDATION'));
   await engine.archiveTask(done.id);

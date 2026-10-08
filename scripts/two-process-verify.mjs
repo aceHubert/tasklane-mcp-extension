@@ -102,18 +102,18 @@ try {
 
   // 跨进程读-改-写只管理业务；无关联执行状态必须拒绝且不能覆盖标题。
   await Promise.all([
-    a.call('task_update', { id: idB, title: 'renamed by A' }),
-    b.call('task_update', { id: idB, priority: 'P0' }),
+    a.call('task_update', { action: 'update', id: idB, title: 'renamed by A' }),
+    b.call('task_update', { action: 'update', id: idB, priority: 'P0' }),
   ]);
-  const rejected = await b.call('task_update', { id: idB, execution: { state: 'waiting' } });
+  const rejected = await b.call('task_update', { action: 'update', id: idB, execution: { state: 'waiting' } });
   const final = JSON.parse(text(await a.call('task_get', { id: idB }))).task;
   check('P1 跨进程业务更新不互相覆盖', final.title === 'renamed by A' && final.priority === 'P0');
   check('P1 无关联执行写入拒绝且无副作用', rejected.result.isError === true && text(rejected).includes('EXECUTION_REPORT_REQUIRED') && final.execution.state === 'idle');
 
   /* ---------- 并发首次指派：不再创建内部 session 或工作区 ---------- */
   const [sa, sb] = await Promise.all([
-    a.call('task_assign', { id: idA, assignee: 'agent' }),
-    b.call('task_assign', { id: idA, assignee: 'agent' }),
+    a.call('task_update', { action: 'assign', id: idA, assignee: 'agent' }),
+    b.call('task_update', { action: 'assign', id: idA, assignee: 'agent' }),
   ]);
   const assignedA = JSON.parse(text(sa)).task;
   const assignedB = JSON.parse(text(sb)).task;
@@ -166,12 +166,12 @@ try {
   /* ---------- 原生执行协议并发：仅模拟关联回执，不证明真实宿主路由 ---------- */
   await a.call('task_move', { id: multiA.id, boardId: boardRa.id, status: 'ready' });
   const input = {
-    id: multiA.id, boardId: boardRa.id, action: 'start', workspaceMode: 'project',
+    id: multiA.id, boardId: boardRa.id, requestAction: 'start', workspaceMode: 'project',
     hostId: 'twoproc-host', receiverThreadId: 'twoproc-receiver',
   };
   const [requestA, requestB] = await Promise.all([
-    a.call('task_execution_request', { ...input, requestId: 'request-A' }),
-    b.call('task_execution_request', { ...input, requestId: 'request-B' }),
+    a.call('task_execution', { action: 'request', ...input, requestId: 'request-A' }),
+    b.call('task_execution', { action: 'request', ...input, requestId: 'request-B' }),
   ]);
   const requestedA = JSON.parse(text(requestA));
   const requestedB = JSON.parse(text(requestB));
@@ -179,8 +179,8 @@ try {
   check('P5 request 原子标记 Agent，仅 starting，无内部 session', [requestedA, requestedB].every((result) => result.task.assignee === 'agent' && result.task.execution.state === 'starting' && !result.task.execution.sessionId));
   const receipt = { id: multiA.id, boardId: boardRa.id, requestId: requestedA.request.requestId, runId: requestedA.request.runId };
   const [claimA, claimB] = await Promise.all([
-    a.call('task_execution_claim', { ...receipt, claimId: 'claim-A' }),
-    b.call('task_execution_claim', { ...receipt, claimId: 'claim-B' }),
+    a.call('task_execution', { action: 'claim', ...receipt, claimId: 'claim-A' }),
+    b.call('task_execution', { action: 'claim', ...receipt, claimId: 'claim-B' }),
   ]);
   const claimResults = [claimA, claimB];
   const winners = claimResults.filter((result) => !result.result.isError);
@@ -189,15 +189,15 @@ try {
   if (winners.length !== 1) throw new Error('认领竞争没有唯一赢家');
   const claim = { ...receipt, claimId: JSON.parse(text(winners[0])).request.claimId };
   const [sameClaimA, sameClaimB] = await Promise.all([
-    a.call('task_execution_claim', claim), b.call('task_execution_claim', claim),
+    a.call('task_execution', { action: 'claim', ...claim }), b.call('task_execution', { action: 'claim', ...claim }),
   ]);
   check('P5 原 claimId 跨进程幂等，不抢占不再创建', [sameClaimA, sameClaimB].every((result) => JSON.parse(text(result)).claimed === false));
   const binding = { ...claim, threadId: 'twoproc-thread', hostId: input.hostId, workspacePath: boardRa.repo, workspaceOwner: 'user', branch: 'main' };
-  const created = JSON.parse(text(await a.call('task_execution_bind', { ...binding, phase: 'created' })));
+  const created = JSON.parse(text(await a.call('task_execution', { action: 'bind', ...binding, phase: 'created' })));
   check('P5 created 持久化原生结果但不绑定/不写 running', created.request.status === 'created' && created.request.result.threadId === binding.threadId && !created.task.executionBinding && created.task.execution.state === 'starting');
   const [boundA, boundB] = await Promise.all([
-    a.call('task_execution_bind', { ...binding, phase: 'bound' }),
-    b.call('task_execution_bind', { ...binding, phase: 'bound' }),
+    a.call('task_execution', { action: 'bind', ...binding, phase: 'bound' }),
+    b.call('task_execution', { action: 'bind', ...binding, phase: 'bound' }),
   ]);
   // Git 校验有异步间隙：同结果重复绑定可成功，也可要求重新读取后恢复。
   for (const result of [boundA, boundB]) {
@@ -205,13 +205,13 @@ try {
       check('P5 并发绑定旧快照明确返回冲突', text(result).includes('EXECUTION_CONFLICT'));
     }
   }
-  const bound = JSON.parse(text(await b.call('task_execution_bind', { ...binding, phase: 'bound' })));
+  const bound = JSON.parse(text(await b.call('task_execution', { action: 'bind', ...binding, phase: 'bound' })));
   check('P5 bound 复用同 claim/result，仅 starting', bound.request.status === 'bound' && bound.task.executionBinding.threadId === binding.threadId && bound.task.execution.state === 'starting' && JSON.stringify(bound.request.result) === JSON.stringify(created.request.result));
   const report = { ...receipt, threadId: binding.threadId, hostId: input.hostId };
   await Promise.all([
-    a.call('task_update', { id: multiA.id, boardId: boardRa.id, title: 'renamed during report' }),
-    b.call('task_execution_report', { ...report, reportId: 'run-1', state: 'running', activity: '协议测试回执' }),
-    a.call('task_execution_report', { ...report, reportId: 'run-1', state: 'running', activity: '协议测试回执' }),
+    a.call('task_update', { action: 'update', id: multiA.id, boardId: boardRa.id, title: 'renamed during report' }),
+    b.call('task_execution', { action: 'report', ...report, reportId: 'run-1', state: 'running', activity: '协议测试回执' }),
+    a.call('task_execution', { action: 'report', ...report, reportId: 'run-1', state: 'running', activity: '协议测试回执' }),
   ]);
   const runningDetail = JSON.parse(text(await a.call('task_get', { id: multiA.id })));
   const runningTask = runningDetail.task;
@@ -219,19 +219,19 @@ try {
   const autoMoves = runningDetail.timeline.filter((event) => event.kind === 'moved' && event.detail === 'ready → doing');
   check('P5 双进程重复 running 原子移到 Doing 且只记录一次 moved', runningTask.status === 'doing' && autoMoves.length === 1 && autoMoves[0].at === runningTask.execution.startedAt);
   const [lateDelivery, waiting] = await Promise.all([
-    a.call('task_execution_delivery', { ...receipt, status: 'uncertain', error: '模拟传输超时' }),
-    b.call('task_execution_report', { ...report, reportId: 'wait-1', state: 'waiting' }),
+    a.call('task_execution', { action: 'delivery', ...receipt, status: 'uncertain', error: '模拟传输超时' }),
+    b.call('task_execution', { action: 'report', ...report, reportId: 'wait-1', state: 'waiting' }),
   ]);
   check('P5 迟到投递不会覆盖运行阶段', ['running', 'waiting'].includes(JSON.parse(text(lateDelivery)).request.status) && JSON.parse(text(waiting)).request.status === 'waiting');
   const [completeA, completeB] = await Promise.all([
-    a.call('task_execution_report', { ...report, reportId: 'complete-1', state: 'completed' }),
-    b.call('task_execution_report', { ...report, reportId: 'complete-1', state: 'completed' }),
+    a.call('task_execution', { action: 'report', ...report, reportId: 'complete-1', state: 'completed' }),
+    b.call('task_execution', { action: 'report', ...report, reportId: 'complete-1', state: 'completed' }),
   ]);
   const completeTask = JSON.parse(text(await b.call('task_get', { id: multiA.id }))).task;
   check('P5 双进程同 reportId 完成回执仅持久一次且保留 Doing', [completeA, completeB].every((result) => !result.result.isError) && completeTask.execution.state === 'completed' && completeTask.status === 'doing' && completeTask.executionRequests.length === 1 && completeTask.executionRequests[0].reports.length === 3);
   const message = '完整回复\n'.repeat(100);
-  const reply = JSON.parse(text(await b.call('task_execution_request', { ...input, requestId: 'reply-2', action: 'reply', message })));
-  const stale = await a.call('task_execution_report', { ...report, reportId: 'late-run-1', state: 'running' });
+  const reply = JSON.parse(text(await b.call('task_execution', { action: 'request', ...input, requestId: 'reply-2', requestAction: 'reply', message })));
+  const stale = await a.call('task_execution', { action: 'report', ...report, reportId: 'late-run-1', state: 'running' });
   check('P5 新轮保存完整回复/新 runId，旧轮回执拒绝', reply.request.message === message && reply.request.runId !== receipt.runId && stale.result.isError === true && text(stale).includes('EXECUTION_STALE'));
 
   /* ---------- 归档并发：单条归档 / 守卫 / 双进程批量不重复 ---------- */
@@ -249,7 +249,7 @@ try {
   check('P4 A 归档 done 任务成功', archByA.changed === true && Boolean(archByA.task.archivedAt));
 
   // B 面对已归档任务的常规修改被核心层拒绝（跨进程不可绕过）
-  const updByB = await b.call('task_update', { id: idDone, title: 'x' });
+  const updByB = await b.call('task_update', { action: 'update', id: idDone, title: 'x' });
   check(
     'P4 B 修改归档任务返回 TASK_ARCHIVED',
     updByB.result.isError === true && text(updByB).includes('TASK_ARCHIVED'),
@@ -258,7 +258,7 @@ try {
   // B 恢复后 A 的修改恢复可用（跨进程状态一致）
   const restoreByB = JSON.parse(text(await b.call('task_restore', { id: idDone })));
   check('P4 B 恢复归档任务', restoreByB.changed === true && restoreByB.task.archivedAt === undefined);
-  const updByA = await a.call('task_update', { id: idDone, title: 'renamed after restore' });
+  const updByA = await a.call('task_update', { action: 'update', id: idDone, title: 'renamed after restore' });
   check('P4 恢复后 A 可继续修改', updByA.result.isError !== true);
 
   // 双进程并发批量归档：文件锁串行化，每个任务只被归档一次，数量合计准确

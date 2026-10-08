@@ -65,11 +65,12 @@ export function AppHeader({ onNew, wide = false }: { onNew?: () => void; wide?: 
               value={boardId ?? ''}
               onChange={(e) => switchBoard(e.target.value)}
               aria-label={t('header.switchBoardAria')}
-              title={board?.repo ?? t('header.switchBoardAria')}
+              title={board?.repoConflict ?? board?.repo ?? board?.projectDir ?? t('header.switchBoardAria')}
             >
               {boards.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {t('header.boardOption', { name: b.name, count: b.total })}
+                <option key={b.id} value={b.id}
+                  title={b.repoConflict ?? b.projectDir ?? undefined}>
+                  {t(b.projectDir && !b.repoKey ? 'header.boardOptionNonGit' : 'header.boardOption', { name: b.name, count: b.total })}
                 </option>
               ))}
             </select>

@@ -165,6 +165,48 @@ export class GitService {
   }
 
   /**
+   * 仓库身份探测：明确不是 Git 仓库时返回 null（非 Git 项目注册/能力刷新用），
+   * 其他失败（路径不存在、Git 不可用、损坏配置、裸仓库、非标准布局）按原语义抛错——
+   * 不能把权限问题或损坏仓库静默降级为"普通非 Git 目录"。
+   * 与 identifyRepo 一样不依赖 this.enabled（注册与刷新始终可用 Git 探测）。
+   */
+  async probeRepo(dirInput: string): Promise<RepoValidation | null> {
+    if (!path.isAbsolute(dirInput)) {
+      throw new BoardError('VALIDATION', `repo 必须是绝对路径: ${dirInput}`);
+    }
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(dirInput);
+    } catch {
+      throw new BoardError('VALIDATION', `路径不存在: ${dirInput}`);
+    }
+    if (!st.isDirectory()) {
+      throw new BoardError('VALIDATION', `路径不是目录: ${dirInput}`);
+    }
+    try {
+      // stderr 分类依赖英文 "not a git repository"：强制 C locale，避免继承
+      // 用户环境的本地化 git 消息（中文输出会让非 Git 目录误判为需报告的错误）。
+      await exec('git', ['rev-parse', '--show-toplevel'], {
+        cwd: dirInput, maxBuffer: 16 * 1024 * 1024,
+        env: { ...sanitizedGitEnv(), LC_ALL: 'C', LANG: 'C' },
+      });
+    } catch (err) {
+      const e = err as { code?: number | string; stderr?: string; message?: string };
+      // exit 128 + "not a git repository" 是明确的非 Git 目录；
+      // 其他 128（裸仓库 "must be run in a work tree" 等）交给 identifyRepo
+      // 按注册校验原语义分类；ENOENT（git 缺失）、损坏配置等是需报告的真实错误
+      const stderr = typeof e.stderr === 'string' ? e.stderr : '';
+      if (e.code === 128 && /not a git repository/i.test(stderr)) return null;
+      if (e.code === 128) return this.identifyRepo(dirInput);
+      throw new BoardError(
+        'GIT_ERROR',
+        `无法识别 Git 状态: ${dirInput}: ${stderr.trim() || e.message || String(err)}`,
+      );
+    }
+    return this.identifyRepo(dirInput);
+  }
+
+  /**
    * 注册看板前的仓库校验：identifyRepo + 基线分支存在；首次提交前允许当前未诞生分支。
    * 从 worktree / 子目录注册时识别主仓库根目录。
    * 注意：注册校验不依赖 this.enabled（执行计划 §4.1 —— 即使任务 Git 功能

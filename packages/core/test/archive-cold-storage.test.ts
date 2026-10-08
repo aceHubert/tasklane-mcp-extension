@@ -25,8 +25,8 @@ function fixture() {
 
 test('v4 归档迁移备份原始字节、拆分任务时间线，重开不覆盖备份或重复记录', () => {
   const { file, cold, store, engine } = fixture();
-  assert.equal(read(file).version, 5);
-  assert.equal(read(cold).version, 1);
+  assert.equal(read(file).version, 7);
+  assert.equal(read(cold).version, 3);
   assert.deepEqual(read(`${file}.v4.bak`), golden.input);
   assert.equal(readFileSync(`${file}.v4.bak`, 'utf8'), JSON.stringify(golden.input));
   assert.deepEqual(Object.keys(read(file).tasks).sort(), ['TASK-1', 'TASK-3']);
@@ -47,7 +47,7 @@ test('迁移在已有部分冷文件时可重跑，原始任务和时间线不�
   // 注入冷文件已提交、主文件仍为 v4 的迁移中间态。
   write(file, golden.input);
   const store = new JsonFileBoardStore(file);
-  assert.equal(read(file).version, 5);
+  assert.equal(read(file).version, 7);
   assert.equal(store.listTasks({ archive: 'all' }).length, 3);
   assert.deepEqual(Object.keys(read(cold).tasks), ['TASK-2']);
   assert.deepEqual(store.getSession('TASK-2'), golden.input.sessions['TASK-2']);
@@ -204,7 +204,7 @@ test('归档任务 bound 绑定优先返回 TASK_ARCHIVED，过期运行或缺�
     data.tasks['TASK-2'].execution.runId = stale ? 'run-current' : 'run-old';
     data.tasks['TASK-2'].executionRequests = [{
       requestId: 'request-old', runId: 'run-old', taskId: 'TASK-2', boardId: 'default',
-      action: 'start', workspaceMode: 'project', repo: '/repos/cold',
+      purpose: 'implementation', action: 'start', workspaceMode: 'project', repo: '/repos/cold',
       status: 'pending', requestedAt: at, updatedAt: at,
     }];
     write(cold, data);

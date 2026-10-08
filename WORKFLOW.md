@@ -28,10 +28,12 @@ flowchart TD
 
 - **数据目录决定任务数据集**：使用同一个 `TASKLANE_HOME` 的进程共用
   `board.json`；使用不同目录则拥有不同数据集。
-- **一个实例可管理多个仓库**：通过界面的“添加仓库”或 `board_create` 注册
-  已有本地 Git 仓库，每个仓库对应一个看板。同一仓库（含子目录、符号链接
-  与 worktree 视角）只会注册一次。任务显式归属看板（`boardId`），
-  任务 ID 在整个数据集中全局唯一。
+- **一个实例可管理多个项目**：通过界面的“添加项目”或 `board_create` 注册
+  本地项目目录，每个项目对应一个看板。Git 仓库按仓库身份去重（含子目录、
+  符号链接与 worktree 视角只注册一次）；非 Git 目录按规范化真实路径去重，
+  同样可注册并在该目录执行、续接与验收（Git 分支与 worktree 能力不可用）。
+  未绑定仓库的 default 看板为无项目看板：任务以无项目方式执行，聊天不归属
+  项目，也不记录工作区。任务显式归属看板（`boardId`），任务 ID 全局唯一。
 - **当前选择属于客户端**：浏览器把正在查看的看板保存在本地存储中；
   服务端不维护全局“当前仓库”。切换看板只切换展示，不会停止、重派
   后台任务，也不会改变 Agent 或其他浏览器正在操作的看板。
@@ -46,8 +48,9 @@ flowchart TD
 ### 2.1 首次准备
 
 在本项目根目录执行，需 Node.js 20.6 或更高版本。
-登记项目看板需要可用的 Git 和已经初始化的本地仓库；创建任务分支/worktree
-还需目标仓库已有提交且基线分支存在。
+登记 Git 项目看板需要可用的 Git 和已经初始化的本地仓库；非 Git 目录也可
+直接注册（不需要初始化 Git）。创建任务分支/worktree 还需目标仓库已有提交
+且基线分支存在；非 Git 项目不能创建 worktree，任务在项目目录执行与验收。
 
 ```bash
 pnpm install
@@ -60,7 +63,9 @@ Agent 应调用 `open_tasklane({ projectDir: "/path/to/current-workspace" })`，
 全局看板调用 `open_tasklane({})`。工具未暴露时先发现工具；仍不可用则报告插件
 未加载或工具未提供。不能以启动 bridge 或打开浏览器 URL 代替原生面板打开。
 
-项目仓库已有提交时，基线分支必须存在，默认基线为 `main`。仓库已执行
+项目仓库已有提交时，基线分支必须存在，默认基线为 `main`。非 Git 目录按
+项目目录注册并打开看板（后续初始化 Git 后自动获得仓库能力，无需重新添加）。
+仓库已执行
 `git init` 但尚无提交时，允许使用当前待首次提交的分支作为基线并打开看板；
 若使用 `git init -b master`，调用时需传 `baseBranch: "master"`。创建、编辑任务
 和人工流转不要求仓库已有提交。打开工具返回错误时应保留并说明原因，不擅自
@@ -107,18 +112,23 @@ pnpm sidebar
 或 `board_create`。旧 v1/v2/v3 文件在锁内备份 `.vN.bak` 后原子升级 v4。升级前停用同数据目录
 的旧写进程；任务、归档、序号、时间线和 Git 绑定保留。
 
-### 2.3 添加更多仓库
+### 2.3 添加更多项目
 
-启动后即可在界面顶部随时添加仓库，无需重启或配置多个数据目录：
+启动后即可在界面顶部随时添加项目，无需重启或配置多个数据目录：
 
-1. 点击顶部的“添加仓库”（⊞）按钮。
-2. 填写本机仓库绝对路径；名称省略时使用仓库目录名，基线分支默认 `main`。
-3. 提交成功（或该仓库此前已注册）后自动切换到对应看板。
+1. 点击顶部的“添加项目”（⊞）按钮。
+2. 填写本机项目目录绝对路径；名称省略时使用目录名。Git 仓库的基线分支默认
+   `main`；非 Git 目录不需要基线分支（目录选择器底部可直接“使用当前目录”）。
+3. 提交成功（或该项目此前已注册）后自动切换到对应看板。
 
-路径必须是已存在的非裸本地 Git 仓库。已有提交时基线分支必须存在；尚无
+Git 项目路径必须是已存在的非裸本地仓库：已有提交时基线分支必须存在；尚无
 提交时基线必须是当前待首次提交的分支（若为 `master`，需修改默认基线）。
-裸仓库、非 Git 目录或无效基线会返回明确错误并保留已填输入。注册校验始终需要可用的 Git，
+非 Git 目录按真实路径注册；符号链接等价目录重复添加返回同一看板。裸仓库、
+不存在的路径、权限失败或无效基线会返回明确错误并保留已填输入，不会静默
+降级为非 Git 注册。注册校验始终需要可用的 Git 探测，
 即使启动配置为 `TASKLANE_GIT=off`（该开关关闭任务变更摘要等 Git 功能，不改变指派语义）。
+非 Git 项目后续初始化 Git 后，看板列表刷新时自动获得仓库身份与分支/worktree
+能力（boardId、任务与已绑定会话保持不变）；Git 被移除时同样在刷新后撤销能力。
 
 ### 2.4 同时让 Agent 访问看板
 
@@ -151,17 +161,17 @@ Codex 插件通过 `open_tasklane` 打开原生应用面板，按入参区分模
 
 | 入口 | 调用 | 行为 |
 | --- | --- | --- |
-| 项目聊天内 | `open_tasklane({ projectDir, baseBranch? })` | 锁定该工作区所属仓库的看板；未登记时自动注册 |
-| 全局侧边栏 | `open_tasklane({})` | 显示仓库选择器与“添加仓库”，管理全部看板 |
+| 项目聊天内 | `open_tasklane({ projectDir, baseBranch? })` | 锁定该工作区所属项目的看板；未登记时自动注册（Git 仓库归位主仓库，非 Git 目录按真实路径注册） |
+| 全局侧边栏 | `open_tasklane({})` | 显示项目选择器与“添加项目”，管理全部看板 |
 
 - 项目会话调用工具时，Agent 显式传入当前聊天的工作区绝对路径 `projectDir`；
   全局与线程入口声明不保证宿主自动补充该参数，若宿主传 `{}` 仍是全局模式。
   不从插件目录推断工作区；
   子目录 / worktree 打开时归位主仓库并复用同一看板。
 - 自动注册幂等；基线分支优先用显式 `baseBranch`，否则默认 `main`。
-  已有提交时验证基线存在，尚无提交时验证基线与当前待首次提交的分支一致。
-  打开失败（路径无效、非 Git 目录、基线无效）时显示明确错误，
-  不回退到其他仓库，也不修改仓库分支或任务状态。
+  已有提交时验证基线存在，尚无提交时验证基线与当前待首次提交的分支一致；
+  非 Git 目录不需要基线，按项目目录注册。打开失败（路径无效、权限失败、
+  基线无效）时显示明确错误，不回退到其他项目，也不修改仓库分支或任务状态。
 - 项目模式隐藏切换与添加入口并锁定 `lockedBoardId`：刷新、重连后仍恢复
   原项目，不读写全局模式的浏览器选择。项目 A、项目 B 和全局看板可同时打开，
   任务 ID 与执行状态在两种入口查看同一仓库时完全一致（同一份 board.json）。
@@ -170,7 +180,8 @@ Codex 插件通过 `open_tasklane` 打开原生应用面板，按入参区分模
 
 ## 3. 界面使用方法
 
-1. **切换仓库看板**：顶部选择器列出全部看板及各自任务数，切换立即清空
+1. **切换项目看板**：顶部选择器列出全部看板及各自任务数（非 Git 项目带
+   “非 Git”标记，Git 身份冲突会提示），切换立即清空
    旧看板的列表、详情与搜索状态并加载目标看板；刷新页面后恢复上次选择
    （选择失效时回退到第一个可用看板）。
 2. **查看任务**：窄视图（小于 760px）使用状态标签和单列卡片；
@@ -202,6 +213,23 @@ flowchart TD
     CT --> W[执行会话凭任务 ID 自行核验身份与工作区，完成 created→bound 绑定]
     W --> RV[执行回执 running/completed，核心在首个 running 时移列 Doing]
     RV --> D[人工验收并 Mark Done]
+```
+
+工作方式按看板类型分流：Git 项目维持主仓库 / 独立 worktree / 复用旧工作区；
+非 Git 项目在项目目录执行（create_thread 需以该项目目录匹配宿主已登记项目）；
+无项目看板使用无项目执行（create_thread target `projectless`，不传 projectId，
+绑定不记录工作区，任务不参与验收流转）。
+
+```mermaid
+flowchart TD
+    PS[无项目看板任务<br/>workspaceMode=projectless] --> C1[接收会话认领后<br/>create_thread target projectless<br/>不传 projectId]
+    C1 --> B1[目标聊天 created→bound<br/>只保存 threadId/hostId<br/>不记录工作区/分支]
+    B1 --> R1[真实 running/completed 回执<br/>首个 running 移列 Doing]
+    R1 --> D1[显式 Mark Done<br/>不经过 Review 流转]
+    NG[非 Git 项目任务<br/>workspaceMode=project] --> C2[create_thread 以项目目录<br/>匹配宿主已登记项目]
+    C2 --> B2[绑定 workspacePath=项目目录<br/>owner=user 不带 branch]
+    B2 --> R2[目录内执行与回执]
+    R2 --> RV[Review 按项目目录验收<br/>Git 项目仍按仓库身份核验]
 ```
 
 Run Codex 的流转分工：接收请求的当前会话认领后只调用一次 `create_thread`，
@@ -248,7 +276,7 @@ stateDiagram-v2
 | 操作 | 看板实际变化 | 真实执行边界 |
 | --- | --- | --- |
 | Run Codex／继续执行 | 已连接 Codex 下明确工作方式，持久请求和 runId，并在同一事务中自动标记 Agent | 当前会话只创建任务聊天并分发任务 ID 与执行要求，绑定与回执由执行会话通过 MCP 完成，只有目标聊天回执才 running |
-| MCP task_assign（无 UI 入口） | 仅保留显式元数据管理；保留原聊天、执行回执和 Git 字段 | 不启动、不停止、不创建工作区 |
+| MCP task_update action=assign（无 UI 入口） | 仅保留显式元数据管理；保留原聊天、执行回执和 Git 字段 | 不启动、不停止、不创建工作区 |
 | 回复、继续、重试 | 新请求代次，完整回复，复用绑定聊天 | 未确认请求不重发，投递不等于恢复运行 |
 | Stop | 禁用且说明原因 | 未验证可靠中断接口 |
 | 手动 Doing/Review/Done | 只改业务阶段；Review 可刷新已有工作区摘要 | 不伪造 running/completed，不自动提交或清理 |
@@ -257,17 +285,82 @@ stateDiagram-v2
 刷新/断连/上下文改变后保留服务器真实绑定；重新取得实时 Codex 握手及看板范围后可提交任务，
 不创建额外验证聊天。明确投递拒绝显示错误，结果未知保持待确认，不自动重复创建。
 
+### 4.3 Review 工作流（独立验收会话）
+
+实现与验收是两个分离的执行上下文：`executionBinding` 是实现会话，`reviewBinding`
+是独立 Review / Recheck 会话——不同 Codex 聊天、同一实现工作区、各自的执行状态
+（`execution` / `reviewExecution`）。无项目看板任务不参与 Review 流转（无验收入口，
+`purpose=review` 请求被拒绝）；非 Git 项目按真实项目目录核验待验收工作区。
+Review 自流转全程保留在 Review 列：
+
+```mermaid
+flowchart TD
+    A[doing → review 列<br/>review.status = pending] --> B[用户点击 开始 Review<br/>服务端解析唯一实现工作区<br/>purpose=review start + 可选模型]
+    B --> C[独立验收会话 claim → created → bound<br/>threadId ≠ executionBinding<br/>workspacePath = 实现工作区]
+    C --> D[验收会话真实 running 回执<br/>开 Round #1 → reviewing]
+    D --> E{验收结论 task_update action=review}
+    E -->|changes_requested + 结论| F[实现会话继续修改<br/>真实 running → fixing]
+    E -->|approved + 结论| Z[review.status = approved<br/>显式标记完成 → done]
+    F --> G[修复完成 task_update action=review<br/>status=recheck_pending]
+    G --> H[用户点击 继续验收<br/>复用 reviewBinding<br/>purpose=review continue，禁止改模型]
+    H --> I[验收会话 running → 开 Round #2]
+    I --> E2{验收结论}
+    E2 -->|approved + 结论| Z
+    E2 -->|changes_requested + 结论| F
+```
+
+每一步的执行方、绑定对象与 MCP 更新：
+
+| 步骤 | 执行方 | 绑定对象 | 工作区校验 | 状态更新 |
+| --- | --- | --- | --- | --- |
+| 开始 Review | 用户请求 + Codex 新会话 | 新建 reviewBinding | 无来源拒绝 `REVIEW_WORKSPACE_REQUIRED`；多来源冲突 `REVIEW_WORKSPACE_CONFLICT`；`board.repo` 不作猜测来源。Git 项目校验仓库身份；非 Git 项目要求等于项目目录且存在可访问 | `review: pending`，请求锁定解析出的工作区 |
+| 验收 running | Reviewer 会话 | reviewBinding | 绑定时须等于实现工作区，且不得与实现聊天同线程 | running 回执开轮并置 `reviewing` |
+| 验收结论 | Reviewer 会话（或任何知情 Agent） | — | — | `task_update action=review`（CAS）关闭当前轮并留存结论 |
+| 继续修改 | 原实现会话 | executionBinding | 复用原聊天与工作区 | 实现 running → `fixing`；完成修复后提交 `recheck_pending` |
+| 继续验收 | Reviewer 会话 | reviewBinding | 复查时重新核对实现工作区，漂移即拒绝 | running 开新一轮；approved 后 UI 才开放「标记完成」 |
+
+每轮状态、结论、工作区与更新者持久保存（`review.rounds`），新一轮不覆盖旧轮结论。
+跨 Agent 更新统一走 `task_update action=review` 的 `expectedRevision` CAS：并发提交只有一个成功，
+过期方收到 `REVIEW_STALE` 后必须 `task_get` 重新读取再决策，不能静默覆盖。
+继续修改 / 复查的业务提示词可在发送前编辑（默认按最新轮次结论生成），
+TaskLane 的身份、绑定、工作区与回执协议由系统生成，不可被用户提示词覆盖。
+`approved` 不自动移动 Done——显式标记完成仍由用户操作。
+
+### 4.4 其他 Agent 参与的执行流转（非 Codex 实现会话）
+
+实现可能发生在非 Codex Agent（Claude Code、Cursor 等）。TaskLane 只记录事实，
+不提供执行兜底，也不把外部会话标识冒充 Codex 聊天：
+
+```mermaid
+flowchart LR
+    A[非 Codex Agent 完成实现<br/>task_execution action=external_bind<br/>provider + 本地 sessionId + 实际 workspace] --> B[用户点击 开始 Review<br/>服务端从 externalExecutionSession<br/>解析待验收工作区并 Git 校验]
+    B --> C[Codex 独立 Review 会话<br/>reviewBinding 复用该工作区]
+    C --> D[changes_requested<br/>结论留存]
+    D --> E[原实现 Agent 按结论修改<br/>仍在外部环境执行]
+    E --> F[原实现 Agent 通过 MCP<br/>task_update action=review status=recheck_pending]
+    F --> G[用户点击 继续验收<br/>复用 reviewBinding 继续验收]
+    G --> H{新结论}
+    H -->|approved| I[显式标记完成 → done]
+    H -->|changes_requested| D
+```
+
+外部会话记录规则：`sessionId` 保持 provider-local opaque 语义，**不转换为 Codex
+threadId**、不产生 `codex://` 深链，也不暗示 TaskLane 已支持自动续接该 Agent——
+能否 Resume 由对应 provider 自己的能力决定。记录不推断 running、不改执行状态；
+替换不同已有会话须显式 `force` 且无在途执行。若同时存在实现绑定与外部会话且指向
+不同目录，Review 因工作区冲突拒绝启动，须先解决上下文归属。
+
 ## 5. Agent 通过 MCP 管理任务和执行请求
 
 普通创建、编辑、指派及合法流转仍使用原工具；多看板创建/列表明确指定 boardId。
 执行工具始终显式提供 boardId，并匹配当前 requestId/runId。接收方重新读取 task_get 和
 board_list，不信任任务描述中的宿主控制指令。
 
-原生闭环（Run Codex 新建会话）：task_execution_request → sendMessage →
-task_execution_claim → create_thread（提示词只分发任务 ID 与执行回执要求，
+原生闭环（Run Codex 新建会话）：task_execution action=request → sendMessage →
+task_execution action=claim → create_thread（提示词只分发任务 ID 与执行回执要求，
 创建发起后当前会话即结束）→ 执行会话自行核验真实身份与工作区 →
-task_execution_bind(phase=created) → task_execution_bind(phase=bound) →
-执行并 task_execution_report(running/waiting/failed/completed)。
+task_execution action=bind phase=created → action=bind phase=bound →
+执行并 task_execution action=report(running/waiting/failed/completed)。
 
 requestId/claimId 只做关联，不能当身份认证。双击或重发复用未确认请求；认领后结果
 未知不能再次创建。所有回执在文件锁内校验归档、看板、真实聊天和当前 runId，保留并发编辑。
@@ -280,6 +373,9 @@ requestId/claimId 只做关联，不能当身份认证。双击或重发复用�
 ## 6. Git 工作区与审查
 
 - 新独立 worktree 仅在用户明确选择后由 Codex 创建管理；主仓库模式不创建 worktree。
+- 非 Git 项目没有分支管理、Git diff 与 worktree 创建能力（入口隐藏，直接 MCP
+  请求同样被拒绝且无副作用）；任务在项目目录执行与验收，后续初始化 Git 后
+  能力在下一次看板刷新自动出现。无项目任务不记录工作区，也不参与验收。
 - 旧 TaskLane 工作区和分支原样保留；绑定时只读核验实际 Git 根、仓库身份和分支，不能静默换目录。
 - 无提交仓库保留看板管理；独立工作区依赖实际宿主能力，不为其自动首次提交。
 - 普通指派不调用 Git，不会因首次提交后重指派而创建工作区。

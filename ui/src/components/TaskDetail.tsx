@@ -8,7 +8,9 @@ import {
   ALLOWED_TRANSITIONS,
   STATUS_ORDER,
   agoText,
+  localInputToIso,
   timeAgo,
+  toLocalInputValue,
   type Priority,
   type TaskStatus,
   type WorkspaceMode,
@@ -16,33 +18,48 @@ import {
 import { AlertIcon, ArchiveIcon, BotIcon, CheckIcon, CopyIcon, PauseIcon, UserIcon, XIcon } from './icons';
 import { HostConnection } from './HostConnection';
 import { ConfirmDialog } from './ConfirmDialog';
-import { executionBlocked, executionRecoverySource, executionTarget, hasRealBinding } from '../host';
-import type { ExecutionRequest } from '../mcp/types';
+import { executionBlocked, executionRecoverySource, executionTarget, hasRealBinding, hasReviewBinding, boardGitCapable, isProjectlessBoard, resolveReviewWorkspacePreview, reviewRecoverySource, reviewStatusOf, type ReviewAction } from '../host';
+import type { ExecutionRequest, TaskReview } from '../mcp/types';
 
 /** 窄栏=整页替换，宽栏=右侧 drawer，共用此组件 */
 export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void; inDrawer?: boolean }) {
-  const { detail, mutate, call, conn, toast, hostSnapshot } = useBoard();
+  const { detail, mutate, call, conn, toast, hostSnapshot, board } = useBoard();
   const { t } = useLang();
   const task = detail?.task;
   const hostConnected = conn === 'connected' && hostSnapshot.connected;
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
-  // 工作方式默认 worktree（独立 worktree 执行）；已有工作区的任务只能原样复用 existing
-  const defaultWorkspace = (): WorkspaceMode => task?.worktreePath ? 'existing' : 'worktree';
+  /** 截止时间（datetime-local 本地值）；空串 = 未设置，blur 时提交或清除 */
+  const [deadline, setDeadline] = useState('');
+  // 工作方式默认值：无项目看板固定 projectless；已有工作区原样复用；
+  // 非 Git 项目默认项目目录；Git 项目默认独立 worktree
+  const projectlessBoard = isProjectlessBoard(board);
+  const gitCapable = boardGitCapable(board);
+  const defaultWorkspace = (): WorkspaceMode | '' =>
+    projectlessBoard ? 'projectless' : task?.worktreePath ? 'existing' : gitCapable ? 'worktree' : 'project';
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode | ''>(defaultWorkspace);
   const [modelDraft, setModelDraft] = useState({ taskId: '', id: '' });
   const [startingTaskId, setStartingTaskId] = useState<string | null>(null);
+  /** 普通续接草稿按任务隔离，轮询刷新不覆盖用户编辑。 */
+  const [continuePrompt, setContinuePrompt] = useState<{ taskId: string; text: string } | null>(null);
+  /** Review 首次验收的模型草稿（reviewBinding 建立后只读） */
+  const [reviewModelDraft, setReviewModelDraft] = useState({ taskId: '', id: '' });
+  /** Review 业务提示词草稿按任务和阶段隔离，首次验收也允许编辑。 */
+  const [reviewPrompt, setReviewPrompt] = useState<{ taskId: string; phase: 'start' | 'fix' | 'recheck'; text: string } | null>(null);
+  const [sendingReview, setSendingReview] = useState(false);
   /** 删除确认弹窗开关：切换任务时随表单一并重置 */
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [recoveryRequest, setRecoveryRequest] = useState<ExecutionRequest | null>(null);
   const [recovering, setRecovering] = useState(false);
+  const [releaseRequest, setReleaseRequest] = useState<ExecutionRequest | null>(null);
+  const [releasing, setReleasing] = useState(false);
   /** 宿主模型目录候选：未绑定任务的模型下拉经 model_list 拉取一次；失败仅保留继承宿主默认 */
   const [modelCatalog, setModelCatalog] = useState<{ status: 'idle' | 'loading' | 'ready' | 'failed'; options: ModelOption[] }>({
     status: 'idle',
     options: [],
   });
   /** 字段级编辑标记：未编辑的字段跟随服务端刷新（外部修改可见），编辑中的不被轮询覆盖 */
-  const [dirty, setDirty] = useState({ title: false, desc: false });
+  const [dirty, setDirty] = useState({ title: false, desc: false, deadline: false });
   const changesRef = useRef<HTMLDivElement | null>(null);
   const formForTask = useRef<string | null>(null);
 
@@ -58,9 +75,13 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
       formForTask.current = task.id;
       setTitle(task.title);
       setDesc(task.description ?? '');
-      setDirty({ title: false, desc: false });
+      setDeadline(toLocalInputValue(task.deadline));
+      setDirty({ title: false, desc: false, deadline: false });
       setWorkspaceMode(defaultWorkspace());
       setModelDraft({ taskId: task.id, id: '' });
+      setReviewModelDraft({ taskId: task.id, id: '' });
+      setReviewPrompt(null);
+      setContinuePrompt(null);
       setDeleteDialogOpen(false);
       setRecoveryRequest(null);
       return;
@@ -68,7 +89,8 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
     // 同一任务的数据刷新：未编辑字段同步外部修改；编辑中字段不动（等 blur 保存）
     if (!dirty.title) setTitle(task.title);
     if (!dirty.desc) setDesc(task.description ?? '');
-  }, [task, dirty.title, dirty.desc]);
+    if (!dirty.deadline) setDeadline(toLocalInputValue(task.deadline));
+  }, [task, dirty.title, dirty.desc, dirty.deadline]);
 
   // 未绑定任务的模型下拉需要宿主目录候选：ref 守卫每次详情会话只拉取一次。
   // 不用 effect cleanup 取消：BoardContext 轮询会持续替换 task 对象，
@@ -84,8 +106,9 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
   }, [call]);
 
   useEffect(() => {
-    if (!task || task.executionBinding || !hostConnected) return;
-    ensureModelCatalog();
+    if (!task || !hostConnected) return;
+    // 模型目录：实现未绑定或 Review 首次验收未绑定时都需要宿主候选
+    if (!task.executionBinding || (task.status === 'review' && !task.reviewBinding)) ensureModelCatalog();
   }, [task, hostConnected, ensureModelCatalog]);
 
   if (!task) {
@@ -149,6 +172,25 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
     });
   };
 
+  // blur 保存：datetime-local 空值表示清除（提交 null）；非空在浏览器侧换算为
+  // 带时区 ISO 再提交，避免服务端时区与浏览器不同导致截止时间偏移。
+  const blurDeadline = () => {
+    if (!dirty.deadline) return;
+    if (deadline === toLocalInputValue(task.deadline)) {
+      setDirty((d) => ({ ...d, deadline: false }));
+      return;
+    }
+    void saveField({ deadline: localInputToIso(deadline) ?? null }, 'deadline').then((ok) => {
+      if (ok) setDirty((d) => ({ ...d, deadline: false }));
+    });
+  };
+
+  const clearDeadline = () => {
+    setDeadline('');
+    setDirty((d) => ({ ...d, deadline: false }));
+    void saveField({ deadline: null }, 'deadline');
+  };
+
   const { move, restore } = actions;
 
   const highlightChanges = () => {
@@ -161,23 +203,24 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
   const creationRequest = creationModelRequest(task);
   const recoveredCreation = executionRecoverySource(task);
   const pendingCreation = !task.executionBinding && Boolean(creationRequest);
-  // 核对/恢复入口仅在请求未终结且卡住时出现：等待回执超过 5 分钟视为需要人工干预。
-  // blocked/uncertain 同属等待宿主的非终态，超时同样显示；completed/failed/rejected/cancelled 不显示。
+  // 创建流程等待回执超过 5 分钟时显示核对入口；其他状态由状态提示与继续操作承载。
   const REQUEST_STUCK_MS = 5 * 60_000;
   const canRecover = !archived && Boolean(currentRequest &&
-    ['pending', 'delivered', 'claimed', 'created', 'bound', 'uncertain', 'blocked'].includes(currentRequest.status) &&
+    ['pending', 'delivered', 'claimed', 'created', 'bound'].includes(currentRequest.status) &&
     Date.now() - Date.parse(currentRequest.updatedAt) > REQUEST_STUCK_MS);
   const statusCheckReason = executionStatusCheckReason(hostSnapshot, task);
   const sendingStart = startingTaskId === task.id;
   const draft = modelDraft.taskId === task.id ? modelDraft : { taskId: task.id, id: '' };
   const modelId = pendingCreation ? creationRequest?.model ?? '' : draft.id;
-  const selectedWorkspace = pendingCreation ? creationRequest!.workspaceMode : workspaceMode;
+  const selectedWorkspace = projectlessBoard ? 'projectless' : pendingCreation ? creationRequest!.workspaceMode : workspaceMode;
   let selectedModel: string | undefined;
   let modelInvalid = false;
   if (!task.executionBinding && modelId) {
     try { selectedModel = normalizeExecutionModel(modelId); } catch { modelInvalid = true; }
   }
   const continueExisting = Boolean(task.executionBinding || isBlocked);
+  const continueText = continuePrompt?.taskId === task.id
+    ? continuePrompt.text : t('native.continuePromptDefault');
   const blocked = actions.reason(continueExisting ? 'continue' : 'start', selectedWorkspace || undefined);
   const startExecution = async () => {
     if (!selectedWorkspace || modelInvalid || sendingStart) return;
@@ -194,6 +237,15 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
     try { await actions.recover(request); }
     finally { setRecovering(false); }
   };
+  // 解除等待：用户显式确认旧会话已结束（app-only 工具，服务端守卫仅等待态可解除）
+  const confirmRelease = async () => {
+    const request = releaseRequest;
+    setReleaseRequest(null);
+    if (!request || releasing || locked) return;
+    setReleasing(true);
+    try { await actions.release(request); }
+    finally { setReleasing(false); }
+  };
   // 删除（仅 backlog）：页面内 ConfirmDialog 二次确认，取消/背景/Esc 均不写入；
   // 服务端守卫兜底（非 backlog / 已进入执行链拒绝），失败经 mutate 弹错误 toast
   const requestDelete = () => setDeleteDialogOpen(true);
@@ -204,13 +256,73 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
       t('detail.deleteDone', { id: task.id }),
     ).then((ok) => { if (ok) onClose(); });
   };
+
+  // ---------- Review 工作流（status=review 专有；实现/验收会话分离） ----------
+  const reviewStatus = reviewStatusOf(task);
+  const reviewBindingBound = hasReviewBinding(task.reviewBinding);
+  const recoveredReview = reviewRecoverySource(task);
+  const reviewTarget = executionTarget(task, 'review');
+  const workspacePreview = resolveReviewWorkspacePreview(task);
+  const latestRound = task.review?.rounds.length ? task.review.rounds[task.review.rounds.length - 1] : undefined;
+  // Review 一律隐藏通用入口；无项目任务不提供续接，其他项目阶段保留原有守卫。
+  const showImplementationAction = task.status !== 'review' &&
+    (!continueExisting || !projectlessBoard);
+  const reviewModelDraftValue = reviewModelDraft.taskId === task.id ? reviewModelDraft : { taskId: task.id, id: '' };
+  let reviewModelSelected: string | undefined;
+  let reviewModelInvalid = false;
+  if (!reviewBindingBound && !recoveredReview && reviewModelDraftValue.id) {
+    try { reviewModelSelected = normalizeExecutionModel(reviewModelDraftValue.id); } catch { reviewModelInvalid = true; }
+  }
+  const fixPhase = reviewStatus === 'changes_requested' || reviewStatus === 'fixing';
+  // review 列的「修改」入口属于实现链：渲染在执行区块（doing 列为执行按钮，review 列按验收结论切换为修改按钮）
+  // 无项目任务不参与验收：原入口借验收区隐藏，移入执行区后需显式排除
+  const fixInExecution = task.status === 'review' && fixPhase && !projectlessBoard && hasRealBinding(task.executionBinding);
+  const recheckPhase = reviewStatus === 'recheck_pending';
+  const promptPhase: 'start' | 'fix' | 'recheck' | null = fixPhase ? 'fix'
+    : recheckPhase ? 'recheck' : reviewStatus === 'pending' ? 'start' : null;
+  const defaultPrompt = (phase: 'start' | 'fix' | 'recheck') => (phase === 'start'
+    ? t('native.review.startPromptDefault') : phase === 'fix'
+    ? t('native.review.fixPromptDefault', { number: latestRound?.number ?? 1, conclusion: latestRound?.conclusion ?? '' })
+    : t('native.review.recheckPromptDefault', { conclusion: latestRound?.conclusion ?? '' }));
+  // 提示词两层结构：系统协议封装不可编辑，这里只编辑业务提示词（默认按最新轮次生成）
+  const promptText = reviewPrompt && reviewPrompt.taskId === task.id && reviewPrompt.phase === promptPhase
+    ? reviewPrompt.text : promptPhase ? defaultPrompt(promptPhase) : '';
+  const startReviewReason = actions.reviewReason('review-start');
+  const continueReviewReason = actions.reviewReason('review-continue');
+  const fixReason = actions.reviewReason('review-fix');
+  const sendReview = async (kind: 'start' | 'recheck' | 'fix') => {
+    if (sendingReview || (kind === 'start' && reviewModelInvalid)) return;
+    setSendingReview(true);
+    try {
+      if (kind === 'start') await actions.startReview(reviewModelSelected, promptText);
+      else if (kind === 'recheck') await actions.continueReview(promptText);
+      else await actions.continueFix(promptText);
+    } finally { setSendingReview(false); }
+  };
+
   const primaryCta = archived ? (
     <div className="cta-row"><button className="btn primary" onClick={restore} disabled={disabled}>{t('detail.restoreToDone')}</button></div>
   ) : task.status === 'review' ? (
+    // 无项目任务不参与验收流转：直接显式标记完成，不展示验收门槛
+    projectlessBoard ? (
+      <div className="cta-row">
+        <button className="btn primary" onClick={() => move('done')} disabled={disabled}>
+          {t('detail.markDone')}
+        </button>
+      </div>
+    ) : (
     <div className="cta-row">
       <button className="btn" onClick={highlightChanges}>{t('card.reviewChanges')}</button>
-      <button className="btn primary" onClick={() => move('done')} disabled={disabled}>{t('detail.markDone')}</button>
+      <button
+        className="btn primary"
+        onClick={() => move('done')}
+        disabled={disabled || reviewStatus !== 'approved'}
+        title={reviewStatus !== 'approved' ? t('native.review.markDoneBlocked') : undefined}
+      >
+        {t('detail.markDone')}
+      </button>
     </div>
+    )
   ) : task.status === 'done' ? (
     // 重新打开与归档同行：归档仅对已完成未归档任务可用（与卡片入口、core 规则一致）；
     // 重新打开会让本轮完成结果退回待审查，用 danger 红色提醒
@@ -286,6 +398,25 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
           </label>
         </div>
 
+        <div className="field">
+          <span className="field-label">{t('detail.fieldDeadline')}</span>
+          <div className="deadline-row">
+            <input
+              type="datetime-local"
+              value={deadline}
+              onChange={(e) => { setDeadline(e.target.value); setDirty((d) => ({ ...d, deadline: true })); }}
+              onBlur={blurDeadline}
+              disabled={locked}
+              aria-label={t('detail.deadlineAria')}
+            />
+            {task.deadline ? (
+              <button className="link-btn" onClick={clearDeadline} disabled={locked}>
+                {t('detail.deadlineClear')}
+              </button>
+            ) : null}
+          </div>
+        </div>
+
         <label className="field">
           <span className="field-label">{t('detail.fieldDescription')}</span>
           <textarea
@@ -325,7 +456,7 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
         </section>
 
         <section className="sec native-execution">
-          <div className="sec-head">{t(hostConnected ? 'native.workspace' : 'native.session')}</div>
+          <div className="sec-head">{t('native.executionSection')}</div>
           {!unboundTag ? (() => {
             // 执行状态提示条（alert 样式）置于会话行上方；按状态配色并配语义图标。
             // 阻塞时展示完整原因（即当前活动/投递错误），不重复指派对象区的「当前活动」。
@@ -339,13 +470,17 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
               : { cls: 'info', icon: null, text: execStateText };
             return <div className={`status-note ${note.cls}`} role="status">{note.icon}<span>{note.text}</span></div>;
           })() : null}
-          {/* 会话恢复入口紧随状态 alert：阻塞时用户第一眼就能看到恢复操作 */}
+          {/* 创建流程超时的核对入口紧随状态提示条 */}
           {canRecover ? (
             <div className="cta-row">
               <button className="btn" disabled={locked || !hostConnected || Boolean(statusCheckReason) || recovering}
                 title={statusCheckReason ? t(`native.reason.${statusCheckReason}`) : undefined}
                 onClick={() => currentRequest && setRecoveryRequest(structuredClone(currentRequest))}>
                 {t(recovering ? 'native.recovery.sending' : 'native.recovery.action')}
+              </button>
+              <button className="btn danger" disabled={locked || releasing}
+                onClick={() => currentRequest && setReleaseRequest(structuredClone(currentRequest))}>
+                {t(releasing ? 'native.release.sending' : 'native.release.action')}
               </button>
             </div>
           ) : null}
@@ -369,16 +504,21 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
               <span className="v">{t(`native.${creationRequest!.workspaceMode}`)}</span></div>
           ) : hostConnected ? (
             <>
-              <label className="field">
+              {projectlessBoard ? (
+                <div className="kv"><span className="k">{t('native.workspace')}</span>
+                  <span className="v">{t('native.projectless')}</span></div>
+              ) : <label className="field">
                 <select aria-label={t('native.workspace')} value={selectedWorkspace} disabled={locked || sendingStart}
                   onChange={(e) => setWorkspaceMode(e.target.value as WorkspaceMode | '')}>
                   {task.worktreePath ? <option value="existing">{t('native.existing')}</option> : <>
                     <option value="project">{t('native.project')}</option>
-                    <option value="worktree">{t('native.worktree')}</option>
+                    {gitCapable ? <option value="worktree">{t('native.worktree')}</option> : null}
                   </>}
                 </select>
-              </label>
-              <p className="native-reason">{t('native.ownership')}</p>
+              </label>}
+              <p className="native-reason">
+                {projectlessBoard ? t('native.projectless.note') : t('native.ownership')}
+              </p>
             </>
           ) : null}
           {/* 模型区按宿主与选择状态分流：
@@ -417,11 +557,33 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
               {modelInvalid ? <p className="native-reason" role="alert">{t('native.model.invalid')}</p> : null}
             </>
           ) : null}
+          {fixInExecution ? (
+            <label className="field">
+              <span className="field-label">{t('native.review.fixPromptLabel')}</span>
+              <textarea aria-label={t('native.review.fixPromptLabel')} rows={5}
+                maxLength={20000} value={promptText} disabled={locked || sendingReview}
+                onChange={(e) => setReviewPrompt({ taskId: task.id, phase: 'fix', text: e.target.value })} />
+            </label>
+          ) : hostConnected && continueExisting && target && showImplementationAction ? (
+            <label className="field">
+              <span className="field-label">{t('native.continuePromptLabel')}</span>
+              <textarea aria-label={t('native.continuePromptLabel')} rows={5}
+                maxLength={20000} value={continueText}
+                disabled={locked || Boolean(blocked) || sendingStart}
+                onChange={(e) => setContinuePrompt({ taskId: task.id, text: e.target.value })} />
+            </label>
+          ) : null}
           {hostConnected || target ? <div className="cta-row">
-            {hostConnected ? (
+            {fixInExecution ? (
+              <button className="btn primary" disabled={locked || Boolean(fixReason) || sendingReview}
+                title={fixReason ? t(`native.reason.${fixReason}`) : undefined}
+                onClick={() => void sendReview('fix')}>
+                {t('native.review.fix', { agent: actions.agentName })}
+              </button>
+            ) : hostConnected && showImplementationAction ? (
               <button className="btn primary" disabled={locked || Boolean(blocked) || modelInvalid || sendingStart}
                 title={blocked ? t(`native.reason.${blocked}`) : undefined}
-                onClick={() => continueExisting ? void actions.continueExecution() : void startExecution()}>
+                onClick={() => continueExisting ? void actions.continueExecution(continueText) : void startExecution()}>
                 {t(isBlocked ? 'native.blocked.continue' : recoveredCreation ? 'native.recovery.reuse' : continueExisting ? 'native.continue' : 'native.start', { agent: actions.agentName })}
               </button>
             ) : null}
@@ -432,14 +594,12 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
               </button>
             ) : null}
           </div> : null}
-          {hostConnected && blocked ? <p className="native-reason" role="status">{t(`native.reason.${blocked}`)}</p> : null}
+          {fixInExecution && fixReason ? <p className="native-reason" role="status">{t(`native.reason.${fixReason}`)}</p> : null}
+          {task.status === 'review' && fixPhase && !projectlessBoard && !hasRealBinding(task.executionBinding) ? (
+            <p className="native-reason" role="status">{t('native.review.fixingNote')}</p>
+          ) : null}
+          {hostConnected && blocked && showImplementationAction ? <p className="native-reason" role="status">{t(`native.reason.${blocked}`)}</p> : null}
           {isBlocked && !target ? <p className="native-reason" role="status">{t('native.blocked.noTarget')}</p> : null}
-          {/* 核对结果只对仍在流转的请求有意义：终态（历史遗留数据）不回显过期异常消息 */}
-          {currentRequest?.recoveryCheck && !['completed', 'failed', 'rejected', 'cancelled'].includes(currentRequest.status) ?
-            <p className="native-reason" role="status">
-              {t(`native.recovery.check.${currentRequest.recoveryCheck.status}`)}
-              {currentRequest.recoveryCheck.message ? ` · ${currentRequest.recoveryCheck.message}` : ''}
-            </p> : null}
           {currentRequest?.status === 'cancelled' ? <p className="native-reason" role="status">{t('native.recovery.done')}</p> : null}
           {recoveredCreation?.result ? <p className="native-reason">{t('native.recovery.preserved', { threadId: recoveredCreation.result.threadId })}</p> : null}
           {actions.requests.length ? <div className="kv"><span className="k">{t('native.request')}</span>
@@ -451,6 +611,156 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
             </div>
           ) : null}
         </section>
+
+        {/* 无项目任务不参与验收；没有可解析的待验收工作区（无来源或冲突，
+            无法区别 worktree 目录）时整个验收区不显示，与既定行为一致 */}
+        {task.status === 'review' && !projectlessBoard && (reviewStatus !== 'pending' || workspacePreview.ok) ? (
+          <section className="sec review-sec" aria-label={t('native.review.section')}>
+            <div className="sec-head">{t('native.review.section')}</div>
+            <div className="cta-row">
+              <span className={`status-pill review-pill ${reviewStatus}`}>{t(`native.review.status.${reviewStatus}`)}</span>
+              {task.reviewExecution ? (
+                <span className={`exec-chip ${task.reviewExecution.state === 'running' ? 'run' : task.reviewExecution.state === 'failed' || task.reviewExecution.state === 'blocked' ? 'fail' : ''}`}>
+                  {t('native.review.execution')} · {t(execKey(task.reviewExecution.state) ?? 'native.review.execution')}
+                </span>
+              ) : null}
+            </div>
+            {/* 待验收工作区：无来源 / 冲突时禁止启动，明确说明而不是禁用按钮暗示可恢复 */}
+            {workspacePreview.ok ? (
+              <div className="kv"><span className="k">{t('native.review.workspace')}</span>
+                <span className="v mono" title={workspacePreview.workspacePath}>{workspacePreview.workspacePath}</span></div>
+            ) : reviewStatus === 'pending' ? (
+              <p className="native-reason" role="status">
+                {t(workspacePreview.reason === 'reviewConflict' ? 'native.review.workspaceConflict' : 'native.review.workspaceRequired')}
+              </p>
+            ) : null}
+            {task.externalExecutionSession ? (
+              <div className="kv"><span className="k">{t('native.review.externalSession')}</span>
+                <span className="v mono" title={t('native.review.externalSessionValue', {
+                  provider: task.externalExecutionSession.provider,
+                  sessionId: task.externalExecutionSession.sessionId,
+                })}>
+                  {t('native.review.externalSessionValue', {
+                    provider: task.externalExecutionSession.provider,
+                    sessionId: task.externalExecutionSession.sessionId,
+                  })}
+                </span></div>
+            ) : null}
+            {reviewBindingBound ? (
+              <div className="kv"><span className="k">{t('native.review.session')}</span>
+                <span className="v mono" title={task.reviewBinding!.threadId}>{task.reviewBinding!.threadId}</span></div>
+            ) : reviewStatus !== 'pending' ? (
+              <p className="native-reason">{t('native.review.noSession')}</p>
+            ) : null}
+            {reviewTarget && !disabled && !actions.openReviewReason ? (
+              <div className="cta-row">
+                <button className="btn" onClick={() => void actions.openReviewSession()}>
+                  {t('native.open', { agent: actions.agentName })}
+                </button>
+              </div>
+            ) : null}
+
+            {/* 首次验收：模型仅此时可选；reviewBinding 建立后只读 */}
+            {reviewStatus === 'pending' && (!reviewBindingBound || recoveredReview) && workspacePreview.ok ? (
+              hostConnected ? (
+                <>
+                  {!recoveredReview ? <label className="field">
+                    <span className="field-label">{t('native.review.modelLabel')}</span>
+                    <select aria-label={t('native.review.modelLabel')} value={reviewModelDraftValue.id}
+                      disabled={locked || sendingReview}
+                      onChange={(e) => setReviewModelDraft({ taskId: task.id, id: e.target.value })}>
+                      <option value="">{t('native.model.default')}</option>
+                      {modelCatalog.options.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label !== option.id ? `${option.label} (${option.id})` : option.id}
+                        </option>
+                      ))}
+                    </select>
+                  </label> : <p className="native-reason">
+                    {t('native.recovery.preserved', { threadId: recoveredReview.result!.threadId })}
+                  </p>}
+                  {!recoveredReview && modelCatalog.status === 'failed' ? (
+                    <p className="native-reason" role="status">{t('native.model.catalogFailed')}</p>
+                  ) : null}
+                  {reviewModelInvalid ? <p className="native-reason" role="alert">{t('native.model.invalid')}</p> : null}
+                  <label className="field">
+                    <span className="field-label">{t('native.review.startPromptLabel')}</span>
+                    <textarea aria-label={t('native.review.startPromptLabel')} rows={5}
+                      maxLength={20000} value={promptText} disabled={locked || sendingReview}
+                      onChange={(e) => setReviewPrompt({ taskId: task.id, phase: 'start', text: e.target.value })} />
+                  </label>
+                  <div className="cta-row">
+                    <button className="btn primary" disabled={locked || Boolean(startReviewReason) || reviewModelInvalid || sendingReview}
+                      title={startReviewReason ? t(`native.reason.${startReviewReason}`) : undefined}
+                      onClick={() => void sendReview('start')}>
+                      {t('native.review.start', { agent: actions.agentName })}
+                    </button>
+                  </div>
+                  {startReviewReason ? <p className="native-reason" role="status">{t(`native.reason.${startReviewReason}`)}</p> : null}
+                </>
+              ) : null
+            ) : null}
+            {reviewBindingBound || recoveredReview ? (
+              <p className="native-reason">{t('native.review.modelLocked')}</p>
+            ) : null}
+
+            {/* 待复查：继续验收走 reviewBinding */}
+            {recheckPhase ? (
+              reviewBindingBound && hostConnected ? (
+                <>
+                  <label className="field">
+                    <span className="field-label">{t('native.review.recheckPromptLabel')}</span>
+                    <textarea rows={5} value={promptText} disabled={locked || sendingReview}
+                      onChange={(e) => setReviewPrompt({ taskId: task.id, phase: 'recheck', text: e.target.value })} />
+                  </label>
+                  <div className="cta-row">
+                    <button className="btn primary" disabled={locked || Boolean(continueReviewReason) || sendingReview}
+                      title={continueReviewReason ? t(`native.reason.${continueReviewReason}`) : undefined}
+                      onClick={() => void sendReview('recheck')}>
+                      {t('native.review.continue', { agent: actions.agentName, number: (task.review?.rounds.length ?? 0) + 1 })}
+                    </button>
+                  </div>
+                  {continueReviewReason ? <p className="native-reason" role="status">{t(`native.reason.${continueReviewReason}`)}</p> : null}
+                </>
+              ) : (
+                <p className="native-reason">{t('native.review.noSession')}</p>
+              )
+            ) : null}
+            {reviewStatus === 'approved' ? <p className="native-reason" role="status">{t('native.review.approvedNote')}</p> : null}
+
+            {/* 轮次与结论留存：新轮不覆盖旧轮 */}
+            {task.review && task.review.rounds.length > 0 ? (
+              <div className="field">
+                <span className="field-label">{t('native.review.rounds')}</span>
+                <ul className="timeline review-rounds">
+                  {[...task.review.rounds].reverse().map((round) => (
+                    <li key={round.id} className={round.status}>
+                      <span className="tl-time mono">{timeAgo(round.startedAt)}</span>
+                      <span className="tl-kind">
+                        {t('native.review.round', { number: round.number })} · {round.status === 'reviewing'
+                          ? t('native.review.roundOpen')
+                          : t(`native.review.status.${round.status}`)}
+                      </span>
+                      {round.conclusion ? (
+                        <details className="review-conclusion">
+                          <summary>
+                            <span className="review-conclusion-text" title={round.conclusion}>
+                              {t('native.review.roundConclusion')}：{round.conclusion}
+                            </span>
+                            <span className="review-conclusion-toggle">
+                              <span className="when-collapsed">{t('native.review.expand')}</span>
+                              <span className="when-expanded">{t('native.review.collapse')}</span>
+                            </span>
+                          </summary>
+                        </details>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
 
         <HostConnection />
 
@@ -539,6 +849,16 @@ export function TaskDetail({ onClose, inDrawer = false }: { onClose: () => void;
             confirmText={t('native.recovery.action')}
             onConfirm={() => void confirmRecovery()}
             onCancel={() => setRecoveryRequest(null)}
+          />
+        ) : null}
+        {releaseRequest ? (
+          <ConfirmDialog
+            title={t('native.release.action')}
+            message={t('native.release.confirm')}
+            confirmText={t('native.release.action')}
+            danger
+            onConfirm={() => void confirmRelease()}
+            onCancel={() => setReleaseRequest(null)}
           />
         ) : null}
         {deleteDialogOpen ? (

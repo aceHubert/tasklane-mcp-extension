@@ -8,6 +8,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -51,8 +52,9 @@ const SESSION_EVENT_KINDS = [
   'execution_uncertain',
   'execution_rejected',
   'execution_recovered',
-  'execution_recovery_requested',
-  'execution_recovery_checked',
+  'execution_external_bound',
+  'review_round',
+  'review_updated',
 ] as const;
 export type SessionEventKind = (typeof SESSION_EVENT_KINDS)[number];
 
@@ -69,14 +71,17 @@ export interface SessionRecord {
 
 const MAX_EVENTS_PER_TASK = 50;
 
-/** 注册看板入参（Git 校验由引擎层完成，存储只负责锁内去重与落盘） */
+/** 注册看板入参（Git 探测由引擎层完成，存储只负责锁内去重与落盘） */
 export interface RegisterBoardInput {
-  /** 仓库身份键（git common dir）；同仓库重复注册的判定依据 */
-  repoKey: string;
-  /** 规范化后的仓库根目录绝对路径 */
-  repo: string;
+  /** 仓库身份键（git common dir）；非 Git 项目为 null */
+  repoKey: string | null;
+  /** Git 主仓库根目录绝对路径；非 Git 项目为 null */
+  repo: string | null;
+  /** 项目目录绝对路径（realPath 规范化）：Git 项目等于主仓库根，非 Git 项目为目录本身 */
+  projectDir: string;
   name: string;
-  baseBranch: string;
+  /** 基线分支；仅 Git 项目有意义，非 Git 项目省略 */
+  baseBranch?: string;
 }
 
 export interface RegisterBoardResult {
@@ -141,10 +146,17 @@ export interface BoardStore {
 type TaskMutationResult = { task: WorkItem; events: SessionEvent[] };
 type TaskMutation = (current: WorkItem) => TaskMutationResult;
 
-/** v5 将归档任务与时间线移到独立冷文件。 */
-const STORE_VERSION = 5;
+/**
+ * v7 新增：Board.projectDir / repoConflict（非 Git 项目身份与能力冲突提示）、
+ * projectless 请求（repo 可空）与缺省 workspace 的执行结果（workspacePath/
+ * workspaceOwner 可成对缺省）。归档冷文件 v3 与主文件同批升级；v1/v2 归档
+ * 读取时按实现语义补 purpose（沿用 v6 规则），迁移时统一重写为 v3。
+ */
+const STORE_VERSION = 7;
+/** 归档冷文件当前版本；读取兼容 v1/v2（旧文件按 implementation 补 purpose） */
+const ARCHIVE_VERSION = 3;
 interface ArchiveData {
-  version: 1;
+  version: typeof ARCHIVE_VERSION;
   boardId: string;
   tasks: Record<string, WorkItem>;
   sessions: Record<string, SessionRecord>;
@@ -200,18 +212,109 @@ function validateNativeExecution(task: StoreObject, invalid: (field: string) => 
     const mapping = object(value, field);
     identifier(mapping.threadId, `${field}.threadId`, true);
     identifier(mapping.hostId, `${field}.hostId`, true);
-    absolutePath(mapping.workspacePath, `${field}.workspacePath`);
-    oneOf(mapping.workspaceOwner, ['codex', 'tasklane', 'user'], `${field}.workspaceOwner`);
+    // projectless 早期可能尚未确定工作区：路径与归属必须成对出现或成对缺省，
+    // 缺省明确表达"尚未确定"，不允许只带其一或伪造路径。
+    const hasPath = mapping.workspacePath !== undefined;
+    const hasOwner = mapping.workspaceOwner !== undefined;
+    if (hasPath !== hasOwner) invalid(`${field}.workspacePath`);
+    if (hasPath) {
+      absolutePath(mapping.workspacePath, `${field}.workspacePath`);
+      oneOf(mapping.workspaceOwner, ['codex', 'tasklane', 'user'], `${field}.workspaceOwner`);
+    }
     if (mapping.branch !== undefined) text(mapping.branch, `${field}.branch`);
   };
+  const integer = (value: unknown, field: string): void => {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) invalid(field);
+  };
+  const executionShape = (value: unknown, field: string): void => {
+    const mapping = object(value, field);
+    oneOf(mapping.state, ['idle', 'assigned', 'starting', 'running', 'waiting', 'blocked', 'failed', 'completed'], `${field}.state`);
+    if (mapping.activity !== undefined && typeof mapping.activity !== 'string') invalid(`${field}.activity`);
+    for (const name of ['sessionId', 'runId', 'startedAt', 'updatedAt']) {
+      if (mapping[name] !== undefined) text(mapping[name], `${field}.${name}`);
+    }
+  };
+  const reviewActor = (value: unknown, field: string): void => {
+    const mapping = object(value, field);
+    oneOf(mapping.type, ['human', 'agent'], `${field}.type`);
+    if (mapping.provider !== undefined) text(mapping.provider, `${field}.provider`, 64);
+    if (mapping.sessionId !== undefined) text(mapping.sessionId, `${field}.sessionId`, 200);
+  };
 
-  const execution = object(task.execution, 'execution');
-  if (execution.runId !== undefined) identifier(execution.runId, 'execution.runId');
+  executionShape(task.execution, 'execution');
   if (task.executionBinding !== undefined) {
     const binding = object(task.executionBinding, 'executionBinding');
     oneOf(binding.provider, ['codex-desktop'], 'executionBinding.provider');
     result(binding, 'executionBinding');
     timestamp(binding.boundAt, 'executionBinding.boundAt');
+  }
+  if (task.reviewExecution !== undefined) executionShape(task.reviewExecution, 'reviewExecution');
+  if (task.reviewBinding !== undefined) {
+    const binding = object(task.reviewBinding, 'reviewBinding');
+    oneOf(binding.provider, ['codex-desktop'], 'reviewBinding.provider');
+    result(binding, 'reviewBinding');
+    timestamp(binding.boundAt, 'reviewBinding.boundAt');
+  }
+  // 同一 Codex 聊天不得同时充当实现与验收会话（thread + host 联合判定）
+  if (task.executionBinding !== undefined && task.reviewBinding !== undefined) {
+    const implementation = object(task.executionBinding, 'executionBinding');
+    const reviewBinding = object(task.reviewBinding, 'reviewBinding');
+    if (implementation.threadId === reviewBinding.threadId && implementation.hostId === reviewBinding.hostId) {
+      invalid('reviewBinding.threadId');
+    }
+  }
+  if (task.externalExecutionSession !== undefined) {
+    const session = object(task.externalExecutionSession, 'externalExecutionSession');
+    const provider = text(session.provider, 'externalExecutionSession.provider', 64);
+    // Codex 会话必须走原生绑定，不能借外部会话对象写入 thread 语义
+    if (provider === 'codex-desktop') invalid('externalExecutionSession.provider');
+    // sessionId 是 provider-local opaque 标识：只做长度与控制字符校验，不套用 thread 规则
+    const sessionId = text(session.sessionId, 'externalExecutionSession.sessionId', 200);
+    if (/[\u0000-\u001f\u007f]/.test(sessionId)) invalid('externalExecutionSession.sessionId');
+    absolutePath(session.workspacePath, 'externalExecutionSession.workspacePath');
+    oneOf(session.workspaceOwner, ['user', 'tasklane', 'agent'], 'externalExecutionSession.workspaceOwner');
+    if (session.branch !== undefined) text(session.branch, 'externalExecutionSession.branch', 200);
+    timestamp(session.boundAt, 'externalExecutionSession.boundAt');
+    timestamp(session.updatedAt, 'externalExecutionSession.updatedAt');
+  }
+  if (task.review !== undefined) {
+    const review = object(task.review, 'review');
+    oneOf(review.status, ['pending', 'reviewing', 'changes_requested', 'fixing', 'recheck_pending', 'approved'], 'review.status');
+    integer(review.revision, 'review.revision');
+    if (review.activeRoundId !== undefined) text(review.activeRoundId, 'review.activeRoundId');
+    timestamp(review.updatedAt, 'review.updatedAt');
+    if (!Array.isArray(review.rounds)) invalid('review.rounds');
+    const roundIds = new Set<string>();
+    for (const [index, value] of (review.rounds as unknown[]).entries()) {
+      const field = `review.rounds[${index}]`;
+      const round = object(value, field);
+      const roundId = identifier(round.id, `${field}.id`);
+      if (roundIds.has(roundId)) invalid(`${field}.id`);
+      roundIds.add(roundId);
+      integer(round.number, `${field}.number`);
+      if (round.number !== index + 1) invalid(`${field}.number`);
+      oneOf(round.status, ['reviewing', 'changes_requested', 'approved'], `${field}.status`);
+      absolutePath(round.workspacePath, `${field}.workspacePath`);
+      if (round.conclusion !== undefined && (typeof round.conclusion !== 'string' || round.conclusion.length > 20_000)) invalid(`${field}.conclusion`);
+      if (round.status !== 'reviewing' && !(typeof round.conclusion === 'string' && round.conclusion.trim())) invalid(`${field}.conclusion`);
+      timestamp(round.startedAt, `${field}.startedAt`);
+      if (round.completedAt !== undefined) timestamp(round.completedAt, `${field}.completedAt`);
+      if (round.status === 'reviewing' && round.completedAt !== undefined) invalid(`${field}.completedAt`);
+      if (!Array.isArray(round.updates)) invalid(`${field}.updates`);
+      for (const [updateIndex, updateValue] of (round.updates as unknown[]).entries()) {
+        const updateField = `${field}.updates[${updateIndex}]`;
+        const update = object(updateValue, updateField);
+        identifier(update.id, `${updateField}.id`);
+        timestamp(update.at, `${updateField}.at`);
+        oneOf(update.status, ['pending', 'reviewing', 'changes_requested', 'fixing', 'recheck_pending', 'approved'], `${updateField}.status`);
+        if (update.conclusion !== undefined && (typeof update.conclusion !== 'string' || update.conclusion.length > 20_000)) invalid(`${updateField}.conclusion`);
+        if (update.actor !== undefined) reviewActor(update.actor, `${updateField}.actor`);
+      }
+    }
+    if (review.activeRoundId !== undefined &&
+      (typeof review.activeRoundId !== 'string' || !roundIds.has(review.activeRoundId))) {
+      invalid('review.activeRoundId');
+    }
   }
   if (task.executionRequests === undefined) return;
   if (!Array.isArray(task.executionRequests)) invalid('executionRequests');
@@ -228,7 +331,12 @@ function validateNativeExecution(task: StoreObject, invalid: (field: string) => 
     if (request.taskId !== task.id) invalid(`${field}.taskId`);
     if (request.boardId !== task.boardId) invalid(`${field}.boardId`);
     oneOf(request.action, ['start', 'reply', 'continue', 'retry'], `${field}.action`);
-    oneOf(request.workspaceMode, ['project', 'worktree', 'existing'], `${field}.workspaceMode`);
+    oneOf(request.purpose, ['implementation', 'review'], `${field}.purpose`);
+    oneOf(request.workspaceMode, ['project', 'worktree', 'existing', 'projectless'], `${field}.workspaceMode`);
+    if (request.purpose === 'review') {
+      // review 请求必须携带服务端解析的实现工作区；实现请求不得携带该字段
+      absolutePath(request.workspacePath, `${field}.workspacePath`);
+    } else if (request.workspacePath !== undefined) invalid(`${field}.workspacePath`);
     if (request.hostId !== undefined) identifier(request.hostId, `${field}.hostId`, true);
     if (request.receiverThreadId !== undefined) identifier(request.receiverThreadId, `${field}.receiverThreadId`, true);
     if (request.receiver !== undefined) {
@@ -239,7 +347,8 @@ function validateNativeExecution(task: StoreObject, invalid: (field: string) => 
       if (request.hostId !== undefined && request.hostId !== receiver.hostId) invalid(`${field}.receiver.hostId`);
       if (request.receiverThreadId !== undefined && request.receiverThreadId !== receiver.threadId) invalid(`${field}.receiver.threadId`);
     }
-    absolutePath(request.repo, `${field}.repo`);
+    // projectless 请求没有项目/仓库上下文：repo 为 null；其余请求必须是绝对路径
+    if (request.repo !== null && request.repo !== undefined) absolutePath(request.repo, `${field}.repo`);
     oneOf(request.status, [
       'pending', 'delivered', 'claimed', 'created', 'bound',
       'running', 'waiting', 'blocked', 'completed', 'failed', 'uncertain', 'rejected', 'cancelled',
@@ -248,15 +357,25 @@ function validateNativeExecution(task: StoreObject, invalid: (field: string) => 
     timestamp(request.updatedAt, `${field}.updatedAt`);
     if (request.message !== undefined && (typeof request.message !== 'string' || request.message.length > 20_000)) invalid(`${field}.message`);
     if (request.action === 'reply' && (typeof request.message !== 'string' || !request.message.trim())) invalid(`${field}.message`);
-    if (request.model !== undefined && ((request.action !== 'start' && !(request.action === 'continue' && request.recoveryOf)) || typeof request.model !== 'string' ||
+    if (request.model !== undefined && ((request.action !== 'start' && !request.recoveryOf) || typeof request.model !== 'string' ||
       request.model !== request.model.trim() || request.model.length > EXECUTION_MODEL_MAX_LENGTH ||
       !EXECUTION_MODEL_PATTERN.test(request.model))) invalid(`${field}.model`);
     if (request.claimId !== undefined) identifier(request.claimId, `${field}.claimId`);
     if (request.result !== undefined) result(request.result, `${field}.result`);
     if (request.startedAt !== undefined) timestamp(request.startedAt, `${field}.startedAt`);
     if (request.deliveryError !== undefined && (typeof request.deliveryError !== 'string' || request.deliveryError.length > 200)) invalid(`${field}.deliveryError`);
-    if (request.status === 'rejected' && (typeof request.deliveryError !== 'string' || !request.deliveryError.trim() ||
-      request.result !== undefined || request.startedAt !== undefined)) invalid(`${field}.status`);
+    if (request.status === 'rejected') {
+      const binding = request.purpose === 'review' ? task.reviewBinding : task.executionBinding;
+      const retainedResult = request.result;
+      // 明确创建、准备或投递失败均保留已知聊天结果；任何目标回执都不能伪记分发失败。
+      const preservedResult = retainedResult === undefined ||
+        ((request.claimId !== undefined || request.recoveryOf !== undefined) && isStoreObject(retainedResult) &&
+          (binding === undefined || (isStoreObject(binding) &&
+            ['threadId', 'hostId', 'workspacePath', 'workspaceOwner', 'branch']
+              .every((key) => retainedResult[key] === binding[key]))));
+      if (typeof request.deliveryError !== 'string' || !request.deliveryError.trim() || !preservedResult ||
+        request.startedAt !== undefined || (Array.isArray(request.reports) && request.reports.length > 0)) invalid(`${field}.status`);
+    }
     if (request.status === 'blocked' && (request.claimId === undefined ||
       !(typeof request.deliveryError === 'string' && request.deliveryError.trim()) &&
       !(Array.isArray(request.reports) && request.reports.some((report) => isStoreObject(report) && report.state === 'blocked' &&
@@ -265,47 +384,18 @@ function validateNativeExecution(task: StoreObject, invalid: (field: string) => 
       const recovery = object(request.recovery, `${field}.recovery`);
       timestamp(recovery.at, `${field}.recovery.at`);
       text(recovery.reason, `${field}.recovery.reason`, 200);
-      identifier(recovery.checkId, `${field}.recovery.checkId`);
+      if (recovery.releasedBy !== 'user') invalid(`${field}.recovery.releasedBy`);
       if (recovery.confirmedStopped !== true || request.status !== 'cancelled') invalid(`${field}.recovery`);
     }
     if (request.status === 'cancelled' && request.recovery === undefined) invalid(`${field}.recovery`);
-    if (request.recoveryCheck !== undefined) {
-      const check = object(request.recoveryCheck, `${field}.recoveryCheck`);
-      identifier(check.checkId, `${field}.recoveryCheck.checkId`);
-      if (check.purpose !== undefined) oneOf(check.purpose, ['status', 'recovery'], `${field}.recoveryCheck.purpose`);
-      oneOf(check.status, ['pending', 'busy', 'unknown', 'resumed', 'recovered'], `${field}.recoveryCheck.status`);
-      if (check.purpose === 'status' && check.status === 'recovered') invalid(`${field}.recoveryCheck.status`);
-      timestamp(check.requestedAt, `${field}.recoveryCheck.requestedAt`);
-      oneOf(check.observedStatus, check.purpose === 'status'
-        ? ['pending', 'delivered', 'claimed', 'created', 'bound', 'uncertain', 'blocked', 'running', 'waiting', 'completed', 'failed', 'rejected']
-        : ['pending', 'delivered', 'claimed', 'created', 'bound', 'uncertain', 'blocked'], `${field}.recoveryCheck.observedStatus`);
-      timestamp(check.observedUpdatedAt, `${field}.recoveryCheck.observedUpdatedAt`);
-      if (check.checkedAt !== undefined) timestamp(check.checkedAt, `${field}.recoveryCheck.checkedAt`);
-      if (check.message !== undefined) text(check.message, `${field}.recoveryCheck.message`, 200);
-      if (check.checker !== undefined) {
-        const checker = object(check.checker, `${field}.recoveryCheck.checker`);
-        identifier(checker.threadId, `${field}.recoveryCheck.checker.threadId`, true);
-        identifier(checker.hostId, `${field}.recoveryCheck.checker.hostId`, true);
-      }
-      if (check.observations !== undefined) {
-        if (!Array.isArray(check.observations) || check.observations.length > 4) invalid(`${field}.recoveryCheck.observations`);
-        for (const [index, value] of (check.observations as unknown[]).entries()) {
-          const observed = object(value, `${field}.recoveryCheck.observations[${index}]`);
-          identifier(observed.threadId, `${field}.recoveryCheck.observations.threadId`, true);
-          identifier(observed.hostId, `${field}.recoveryCheck.observations.hostId`, true);
-          oneOf(observed.state, ['active', 'idle', 'waiting', 'unknown'], `${field}.recoveryCheck.observations.state`);
-          timestamp(observed.observedAt, `${field}.recoveryCheck.observations.observedAt`);
-          if (observed.priorOperationEnded !== undefined && typeof observed.priorOperationEnded !== 'boolean') invalid(`${field}.recoveryCheck.observations.priorOperationEnded`);
-        }
-      }
-    }
     if (request.recoveryOf !== undefined) {
       const source = object(request.recoveryOf, `${field}.recoveryOf`);
       identifier(source.requestId, `${field}.recoveryOf.requestId`);
       identifier(source.runId, `${field}.recoveryOf.runId`);
       const origin = (task.executionRequests as StoreObject[]).find((candidate) => candidate.requestId === source.requestId && candidate.runId === source.runId);
       const originResult = origin?.result ?? (origin?.status === 'blocked' ? task.executionBinding : undefined);
-      if (!origin || !['cancelled', 'blocked'].includes(String(origin.status)) || !originResult || !request.result ||
+      if (!origin || !['cancelled', 'blocked', 'rejected'].includes(String(origin.status)) || !originResult || !request.result ||
+        request.purpose !== origin.purpose ||
         request.workspaceMode !== origin.workspaceMode || request.model !== origin.model ||
         ['threadId', 'hostId', 'workspacePath', 'workspaceOwner', 'branch'].some((key) =>
           (request.result as StoreObject)[key] !== (originResult as StoreObject)[key])) invalid(`${field}.recoveryOf`);
@@ -403,10 +493,12 @@ export class JsonFileBoardStore implements BoardStore {
     this.data = this.loadOrMigrate();
   }
 
-  /** 读取磁盘并按需完成 v1/v2/v3/v4 → v5；事务内不重复获取锁。 */
+  /** 读取磁盘并按需完成 v1-v4/v5 → v7 或 v6 → v7；事务内不重复获取锁。 */
   private loadOrMigrate(alreadyLocked = false): StoreData {
     const parsed = this.readRaw();
-    if (parsed.version === STORE_VERSION) return this.normalizeV5(parsed);
+    if (parsed.version === STORE_VERSION) return this.normalizeV7(parsed);
+    if (parsed.version === 6) return this.migrateV6(alreadyLocked);
+    if (parsed.version === 5) return this.migrateV5(alreadyLocked);
     if (parsed.version === 1 || parsed.version === 2 || parsed.version === 3 || parsed.version === 4) {
       return this.migrateLegacy(alreadyLocked);
     }
@@ -416,8 +508,20 @@ export class JsonFileBoardStore implements BoardStore {
   private unknownVersion(version: unknown): BoardError {
     return new BoardError(
       'STORE_ERROR',
-      `未知存储文件版本: ${String(version)}（支持: 1, 2, 3, 4, ${STORE_VERSION}）: ${this.filePath}`,
+      `未知存储文件版本: ${String(version)}（支持: 1, 2, 3, 4, 5, 6, ${STORE_VERSION}）: ${this.filePath}`,
     );
+  }
+
+  /** v5 及更早的请求缺省 purpose：迁移时一律按 implementation 补齐（就地修改解析对象） */
+  private static fillRequestPurpose(parsed: StoreObject): void {
+    const tasks = parsed.tasks;
+    if (!isStoreObject(tasks)) return;
+    for (const task of Object.values(tasks)) {
+      if (!isStoreObject(task) || !Array.isArray(task.executionRequests)) continue;
+      for (const request of task.executionRequests) {
+        if (isStoreObject(request) && request.purpose === undefined) request.purpose = 'implementation';
+      }
+    }
   }
 
   /** 仅在文件不存在时初始化；显式损坏字段不能回退到空看板。 */
@@ -444,17 +548,22 @@ export class JsonFileBoardStore implements BoardStore {
   }
 
   /**
-   * 锁内重读并完整校验后，备份原版本、先写冷文件、最后提交 v5 主文件。
-   * v1 只为缺省 boardId 的任务补唯一看板归属；v2/v3 原样保留任务、归档、
-   * Git、时间线及序号，不推测原生绑定，也不改写旧 running/sessionId。
+   * 锁内重读并完整校验后，备份原版本、先写冷文件、最后提交 v6 主文件。
+   * v1 只为缺省 boardId 的任务补唯一看板归属；v2/v3/v4 原样保留任务、归档、
+   * Git、时间线及序号，不推测原生绑定，也不改写旧 running/sessionId；
+   * 所有旧请求补 purpose=implementation，新 Review 字段保持缺省。
    */
   private migrateLegacy(alreadyLocked: boolean): StoreData {
     if (!alreadyLocked) acquireLock(this.lockPath);
     try {
       const parsed = this.readRaw();
-      if (parsed.version === STORE_VERSION) return this.normalizeV5(parsed);
+      if (parsed.version === STORE_VERSION) return this.normalizeV7(parsed);
       const version = parsed.version;
-      if (version !== 1 && version !== 2 && version !== 3 && version !== 4) throw this.unknownVersion(version);
+      if (version !== 1 && version !== 2 && version !== 3 && version !== 4) {
+        if (version === 5) return this.migrateV5(true);
+        if (version === 6) return this.migrateV6(true);
+        throw this.unknownVersion(version);
+      }
 
       let input = parsed;
       if (version === 1) {
@@ -479,6 +588,8 @@ export class JsonFileBoardStore implements BoardStore {
         }
         input = { ...parsed, boards: ownerBoards, tasks };
       }
+      // 旧版本请求一律按实现语义补 purpose；归档任务在下方搬运时随任务一并落盘
+      JsonFileBoardStore.fillRequestPurpose(input);
       const migrated = this.normalizeV4(input);
       this.backupBeforeMigrate(`.v${version}.bak`);
       const archives = new Map<string, ArchiveData>();
@@ -495,7 +606,42 @@ export class JsonFileBoardStore implements BoardStore {
       }
       for (const archive of archives.values()) this.persistArchive(archive);
       this.persistData(migrated);
-      console.error(`[tasklane] 已升级存储 v${version} → v5（备份: ${this.filePath}.v${version}.bak）`);
+      console.error(`[tasklane] 已升级存储 v${version} → v7（备份: ${this.filePath}.v${version}.bak）`);
+      return migrated;
+    } finally {
+      if (!alreadyLocked) releaseLock(this.lockPath);
+    }
+  }
+
+  /**
+   * v5 → v6：锁内补 purpose=implementation（热任务与归档任务），备份 .v5.bak，
+   * 归档冷文件统一重写为 v2，最后提交 v6 主文件。原任务、请求、时间线、ID、
+   * 归档计数与 Git 绑定原样保留；review / reviewExecution / reviewBinding /
+   * externalExecutionSession 保持缺省（旧任务不因此被推断为已验收）。
+   */
+  private migrateV5(alreadyLocked: boolean): StoreData {
+    if (!alreadyLocked) acquireLock(this.lockPath);
+    try {
+      const parsed = this.readRaw();
+      if (parsed.version === STORE_VERSION) return this.normalizeV7(parsed);
+      if (parsed.version !== 5) {
+        if (parsed.version === 1 || parsed.version === 2 || parsed.version === 3 || parsed.version === 4) {
+          return this.migrateLegacy(true);
+        }
+        if (parsed.version === 6) return this.migrateV6(true);
+        throw this.unknownVersion(parsed.version);
+      }
+      JsonFileBoardStore.fillRequestPurpose(parsed);
+      const migrated = this.normalizeV5(parsed);
+      this.backupBeforeMigrate('.v5.bak');
+      // 归档冷文件与主文件同批升级：回滚到 v5 的旧服务无法静默继续写新语义数据
+      for (const board of migrated.boards) {
+        const archive = this.readArchive(board.id, migrated.archivedCounts[board.id] ?? 0);
+        if (!Object.keys(archive.tasks).length && !Object.keys(archive.sessions).length) continue;
+        this.persistArchive(archive);
+      }
+      this.persistData(migrated);
+      console.error(`[tasklane] 已升级存储 v5 → v6（备份: ${this.filePath}.v5.bak；归档冷文件已重写为 v2）`);
       return migrated;
     } finally {
       if (!alreadyLocked) releaseLock(this.lockPath);
@@ -563,6 +709,13 @@ export class JsonFileBoardStore implements BoardStore {
       optionalText(board.repo, `${field}.repo`, true);
       optionalText(board.repoKey, `${field}.repoKey`, true);
       optionalText(board.baseBranch, `${field}.baseBranch`);
+      optionalText(board.projectDir, `${field}.projectDir`, true);
+      optionalText(board.repoConflict, `${field}.repoConflict`, true);
+      // v7 项目目录身份回填：有仓库的看板 projectDir 等于主仓库根（读取即归一，
+      // 覆盖 v1-v6 全部迁移路径与当前文件）；无仓库看板保持缺省
+      if (typeof board.repo === 'string' && board.repo.trim() && board.projectDir === undefined) {
+        board.projectDir = board.repo;
+      }
     }
     const tasks = parsed.tasks === undefined ? {} : parsed.tasks;
     if (!isStoreObject(tasks)) this.invalidField('tasks');
@@ -585,6 +738,9 @@ export class JsonFileBoardStore implements BoardStore {
         );
       }
       if (task.description !== undefined && typeof task.description !== 'string') this.invalidField(`${field}.description`);
+      // deadline 只做类型校验（与 description 同级），坏值不阻断整个看板加载；
+      // 严格日期解析发生在写入路径（engine / MCP 校验）。
+      if (task.deadline !== undefined && typeof task.deadline !== 'string') this.invalidField(`${field}.deadline`);
       for (const name of ['repo', 'baseBranch', 'branch', 'worktreePath', 'archivedAt']) {
         optionalText(task[name], `${field}.${name}`);
       }
@@ -653,19 +809,73 @@ export class JsonFileBoardStore implements BoardStore {
     return data;
   }
 
+  /** v6 在 v5 结构上仅新增可选任务字段，字段级校验在任务循环内完成 */
+  private normalizeV6(parsed: StoreObject): StoreData {
+    return this.normalizeV5(parsed);
+  }
+
+  /**
+   * v6 → v7：锁内为已有 repo 的看板回填 projectDir（等于主仓库根，保持去重与
+   * 非 Git 注册一致），备份 .v6.bak，归档冷文件统一重写为 v3，最后提交 v7 主文件。
+   * 任务、请求、时间线、ID、序号、归档计数与 Git 绑定原样保留；
+   * 旧请求的 repo 本就是绝对路径，projectless 的可空 repo 只影响新写入。
+   */
+  private migrateV6(alreadyLocked: boolean): StoreData {
+    if (!alreadyLocked) acquireLock(this.lockPath);
+    try {
+      const parsed = this.readRaw();
+      if (parsed.version === STORE_VERSION) return this.normalizeV7(parsed);
+      if (parsed.version !== 6) {
+        if (parsed.version === 1 || parsed.version === 2 || parsed.version === 3 || parsed.version === 4) {
+          return this.migrateLegacy(true);
+        }
+        if (parsed.version === 5) return this.migrateV5(true);
+        throw this.unknownVersion(parsed.version);
+      }
+      const boards = parsed.boards;
+      if (!Array.isArray(boards)) this.invalidField('boards');
+      for (const board of boards) {
+        if (!isStoreObject(board)) this.invalidField('boards[]');
+        // 项目目录身份回填：Git 看板的 projectDir 等于主仓库根；
+        // repo 为空的看板（无项目 default）保持 projectDir 缺省
+        if (board.projectDir === undefined && typeof board.repo === 'string' && board.repo.trim()) {
+          board.projectDir = board.repo;
+        }
+      }
+      const migrated = this.normalizeV6(parsed);
+      this.backupBeforeMigrate('.v6.bak');
+      // 归档冷文件与主文件同批升级为 v3：回滚到 v6 的旧服务无法静默继续写新语义数据
+      for (const board of migrated.boards) {
+        const archive = this.readArchive(board.id, migrated.archivedCounts[board.id] ?? 0);
+        if (!Object.keys(archive.tasks).length && !Object.keys(archive.sessions).length) continue;
+        this.persistArchive(archive);
+      }
+      this.persistData(migrated);
+      console.error(`[tasklane] 已升级存储 v6 → v7（备份: ${this.filePath}.v6.bak；归档冷文件已重写为 v3）`);
+      return migrated;
+    } finally {
+      if (!alreadyLocked) releaseLock(this.lockPath);
+    }
+  }
+
+  /** v7 在 v6 结构上新增看板可选字段与可空 repo/缺省 workspace，校验在共享循环内完成 */
+  private normalizeV7(parsed: StoreObject): StoreData {
+    return this.normalizeV5(parsed);
+  }
+
   private archivePath(boardId: string): string {
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/.test(boardId)) this.invalidField('archive.boardId');
     return path.join(path.dirname(this.filePath), 'archive', `${boardId}.json`);
   }
 
-  /** 使用合成看板复用任务和事件校验，不依赖主文件的看板列表。 */
+  /** 使用合成看板复用任务和事件校验，不依赖主文件的看板列表。读取兼容归档 v1/v2。 */
   private readArchive(boardId: string, expectedCount = this.data?.archivedCounts[boardId] ?? 0): ArchiveData {
     const file = this.archivePath(boardId);
     let raw: string;
     try { raw = readFileSync(file, 'utf8'); } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         if (expectedCount > 0) throw new BoardError('STORE_ERROR', `归档文件缺失，但看板记录了 ${expectedCount} 条归档任务: ${file}`);
-        return { version: 1, boardId, tasks: {}, sessions: {} };
+        return { version: ARCHIVE_VERSION, boardId, tasks: {}, sessions: {} };
       }
       throw error;
     }
@@ -673,8 +883,11 @@ export class JsonFileBoardStore implements BoardStore {
     try { parsed = JSON.parse(raw); } catch {
       throw new BoardError('STORE_ERROR', `归档文件损坏（JSON 解析失败）: ${file}`);
     }
-    if (!isStoreObject(parsed) || parsed.version !== 1 || parsed.boardId !== boardId ||
+    if (!isStoreObject(parsed) || (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== ARCHIVE_VERSION) ||
+      parsed.boardId !== boardId ||
       !isStoreObject(parsed.tasks) || !isStoreObject(parsed.sessions)) this.invalidField(`archive.${boardId}`);
+    // v1 归档是 v6 之前的冷数据：读取时按实现语义补 purpose，不修改磁盘版本
+    if (parsed.version === 1) JsonFileBoardStore.fillRequestPurpose(parsed);
     const data = this.normalizeV4({ ...parsed, boards: [{ id: boardId, name: boardId }] });
     for (const task of Object.values(data.tasks)) {
       if (!task.archivedAt || task.status !== 'done') this.invalidField(`archive.${boardId}.tasks.${task.id}`);
@@ -682,7 +895,7 @@ export class JsonFileBoardStore implements BoardStore {
     for (const id of Object.keys(data.sessions)) {
       if (!Object.hasOwn(data.tasks, id)) this.invalidField(`archive.${boardId}.sessions.${id}`);
     }
-    return { version: 1, boardId, tasks: data.tasks, sessions: data.sessions };
+    return { version: ARCHIVE_VERSION, boardId, tasks: data.tasks, sessions: data.sessions };
   }
 
   private persistArchive(archive: ArchiveData): void {
@@ -758,24 +971,48 @@ export class JsonFileBoardStore implements BoardStore {
 
   registerBoard(input: RegisterBoardInput): RegisterBoardResult {
     return this.transaction(() => {
-      // 锁内重读后判定仓库身份：两个进程并发注册同一仓库只落一个看板
+      // 锁内重读后判定项目/Git 身份：两个进程并发注册同一目录或仓库只落一个看板。
+      // Git 项目按 repoKey（或旧看板的 repo 路径）去重；非 Git 项目按规范化
+      // projectDir 去重——同一物理目录（含符号链接视角）重复添加返回同一看板。
+      const normalizeDir = (value: string): string => {
+        try {
+          return realpathSync(value);
+        } catch {
+          return path.resolve(value);
+        }
+      };
       const existing = this.data.boards.find(
-        (b) => b.repoKey === input.repoKey || (b.repo != null && b.repo === input.repo),
+        (b) =>
+          (input.repoKey !== null && (b.repoKey === input.repoKey ||
+            (input.repo !== null && b.repo != null && b.repo === input.repo))) ||
+          (b.projectDir != null && normalizeDir(b.projectDir) === normalizeDir(input.projectDir)),
       );
       if (existing) {
         // 幂等：返回已有看板，不改变名称、基线与任务归属；顺手补齐身份键
-        if (!existing.repoKey) {
+        let changed = false;
+        if (input.repoKey !== null && !existing.repoKey) {
           existing.repoKey = input.repoKey;
-          this.persist();
+          changed = true;
         }
+        if (input.repo !== null && existing.repo == null && existing.projectDir != null &&
+          normalizeDir(existing.projectDir) === normalizeDir(input.repo)) {
+          existing.repo = input.repo;
+          changed = true;
+        }
+        if (!existing.projectDir) {
+          existing.projectDir = input.projectDir;
+          changed = true;
+        }
+        if (changed) this.persist();
         return { board: structuredClone(existing), created: false };
       }
       const board: Board = {
         id: `board-${randomBytes(4).toString('hex')}`,
         name: input.name,
         repo: input.repo,
-        baseBranch: input.baseBranch,
+        ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
         repoKey: input.repoKey,
+        projectDir: input.projectDir,
       };
       this.data.boards.push(board);
       this.persist();
@@ -810,7 +1047,7 @@ export class JsonFileBoardStore implements BoardStore {
         (filter?.status === undefined || task.status === filter.status) &&
         (filter?.assignee === undefined || task.assignee === filter.assignee) &&
         (filter?.priority === undefined || task.priority === filter.priority),
-      ).sort((a, b) => idNumber(a.id) - idNumber(b.id)));
+      ).sort(compareTasks));
     };
     if (filter?.archive === 'archived' || filter?.archive === 'all') return this.transaction(collect);
     this.reload();
@@ -1091,6 +1328,22 @@ export class JsonFileBoardStore implements BoardStore {
 function idNumber(id: string): number {
   const n = Number.parseInt(id.replace(/^TASK-/i, ''), 10);
   return Number.isNaN(n) ? Number.MAX_SAFE_INTEGER : n;
+}
+
+/**
+ * 任务列表排序：未完成任务按截止时间从近到远排在前（deadline 为 UTC ISO，
+ * 字典序即时间序；无 deadline 靠后），done 任务不参与截止排序、保持 ID 序
+ * 排在最后；各分组内以任务 ID 兜底，保证顺序稳定可复现。
+ */
+function compareTasks(a: WorkItem, b: WorkItem): number {
+  const aDone = a.status === 'done';
+  const bDone = b.status === 'done';
+  if (aDone !== bDone) return aDone ? 1 : -1;
+  if (!aDone && Boolean(a.deadline) !== Boolean(b.deadline)) return a.deadline ? -1 : 1;
+  if (!aDone && a.deadline && b.deadline && a.deadline !== b.deadline) {
+    return a.deadline < b.deadline ? -1 : 1;
+  }
+  return idNumber(a.id) - idNumber(b.id);
 }
 
 function freshBoardList(): Board[] {

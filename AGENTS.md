@@ -31,17 +31,19 @@ Codex Host
 │     ├── task_create     → UI: New Task（归属指定看板）
 │     ├── task_update     → UI: 编辑标题/描述/优先级
 │     ├── task_delete      → UI: 详情底部删除（仅 backlog，硬删除 + 二次确认）
-│     ├── task_execution_* → UI: 原生请求、认领、真实绑定与关联回执
+│     ├── task_execution（action 复合：request/delivery/claim/bind/external_bind/report）→ UI 与 Agent 的执行链
+│     ├── task_update（action=review）→ Reviewer/实现 Agent: 多轮验收状态与结论（revision/CAS）
 │     ├── task_move       → UI: Status selector / 宽视图拖拽
-│     ├── task_assign     → UI: Assign to Agent / Human（仅改变负责人，不启动执行或创建工作区）
+│     ├── task_update（action=assign）→ MCP 调用方的负责人元数据（仅改变负责人，不启动执行或创建工作区）
 │     └── task_export     → UI: 设置菜单「导出报告」（按时间区间导出 Markdown 报告，只读）
 │
 └── MCP Server（mcp, ✅ 已交付）
       └── Board Core（packages/core, ✅ 已交付，可独立测试）
-            ├── Boards        — 多看板注册（仓库身份去重）+ v1/v2/v3/v4→v5 数据升级
-            ├── Tasks        — WorkItem 生命周期（boardId 归属）+ JSON 热存储与按看板归档冷存储
+            ├── Boards        — 多项目看板注册（Git 仓库身份/非 Git 目录去重、能力动态刷新）+ v1–v6→v7 数据升级
+            ├── Tasks        — WorkItem 生命周期（boardId 归属）+ JSON 热存储与按看板归档冷存储（v2）
             ├── Git/Worktree — 只读工作区核验与 diff 摘要（按任务看板路由）
-            └── Session      — 执行状态时间线（assigned/running/waiting/failed/completed）
+            ├── Session      — 执行状态时间线（assigned/running/waiting/failed/completed）
+            └── Review       — 独立验收工作流（reviewBinding/reviewExecution 与多轮结论，CAS 更新）
 
 独立运行：packages/bridge（stdio ↔ WebSocket 薄桥 + 静态托管）
 ```
@@ -54,16 +56,17 @@ Codex Host
 ## 原生执行闭环与宿主能力边界
 
 普通指派和任务阶段是看板操作，不是执行命令。原生执行需要用户明确选择工作方式：
-主仓库、独立 worktree 或原样复用旧工作区。对应执行工具如下，完整参数与状态机见
+主仓库、独立 worktree、原样复用旧工作区或无项目执行（projectless，仅未绑定仓库的
+default 看板：聊天不归属项目、不记录工作区、不参与验收流转）。非 Git 项目看板
+（按真实目录注册）在项目目录执行与验收，不能创建 worktree；Git 能力按目录当前
+状态动态刷新。对应执行工具如下，完整参数与状态机见
 [原生执行契约](docs/native-execution-contract.md)。
 
 | 工具 | 作用 |
 | --- | --- |
-| `task_execution_request` | 持久请求和服务端 runId；同任务未确认请求合并，不重复投递 |
-| `task_execution_delivery` | 投递或结果待确认，不将未知结果伪装为执行失败 |
-| `task_execution_claim` | 锁内唯一认领；禁止超时自动抢占和重复创建 |
-| `task_execution_bind` | 先记录 created 的就绪原生结果，再 bound；只读核验真实工作区 |
-| `task_execution_report` | 匹配任务、看板、threadId/hostId、请求和当前 runId 的真实执行回执 |
+| `task_execution`（action） | 单工具六分支执行链：`request`（持久请求和 runId，同任务未确认请求合并；`purpose=review` 为独立验收执行，子动作 `requestAction`）/ `delivery`（投递或结果待确认，不伪装失败）/ `claim`（锁内唯一认领，禁止超时抢占）/ `bind`（created→bound，只读核验工作区）/ `external_bind`（非 Codex 会话，provider-local sessionId）/ `report`（匹配任务、看板、threadId/hostId、请求和当前 runId 的真实回执） |
+| `task_update`（action=review） | Review 状态更新（revision/CAS）；结论留存，approved 不自动 Done |
+| `task_update`（action=update/assign/review） | 字段编辑、指派与验收状态的复合入口（review 分支即原 task_review_update） |
 | `task_archive / task_restore / task_archive_done` | 归档、恢复和当前看板批量归档；执行入口同样遵守归档守卫 |
 
 只有真实目标聊天报告 running 才写 startedAt；消息投递、聊天创建、指派或移入 doing
@@ -74,6 +77,10 @@ Codex Host
 
 - UI 和 Agent 共用 MCP，业务写入不绕过核心和文件锁。回执合并磁盘最新数据，不覆盖并发编辑。
 - 新独立工作区由 Codex 管理，TaskLane 不在指派时创建；旧 worktree/分支完整保留，不能静默切回主仓库。
+- 无项目执行不记录 workspacePath/workspaceOwner/branch：绑定只需真实 threadId/hostId，
+  不把当前聊天目录、看板数据目录或其他项目当作默认执行目录；无项目任务不参与
+  Review 流转（purpose=review 与外部会话记录均被拒绝），没有待验收工作区时 UI
+  隐藏整个验收区。非 Git 项目绑定 workspacePath=项目目录、owner=user、不带 branch。
 - MCP Apps SDK 支持 sendMessage 和 openLink，但标准握手没有原生线程创建/停止能力。
   UI 要求当前已连接、实时识别为 Codex 且支持用户消息，然后直接提交实际任务；
   不再要求 nativeExecution 声明或独立验证会话。接收 Agent 在实际请求内核对原生工具，

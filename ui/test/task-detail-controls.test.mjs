@@ -44,12 +44,36 @@ function fixture(state, bound, connected, assignee = 'agent') {
   };
   const noop = () => {};
   return {
-    board: { detail: { task, timeline: [] }, conn: connected ? 'connected' : 'disconnected', hostSnapshot: { connected,
+    board: { board: { id: 'default', repo: '/repo', projectDir: '/repo', repoKey: '/repo/.git' }, detail: { task, timeline: [] }, conn: connected ? 'connected' : 'disconnected', hostSnapshot: { connected,
       info: { name: 'Codex', version: 'test' }, capabilities: { message: { text: {} } },
       scope: { mode: 'project', lockedBoardId: task.boardId }, contextVersion: 1 }, mutate: noop, call: noop, toast: noop },
-    actions: { requests: [], agentName: 'Codex', status: bound ? state : 'unbound', reason: () => null, openReason: null, move: noop, restore: noop, archive: noop, start: noop, continueExecution: noop, openSession: noop },
+    actions: { requests: [], agentName: 'Codex', status: bound ? state : 'unbound', reason: () => null, reviewReason: () => null, openReason: null, move: noop, restore: noop, archive: noop, start: noop, continueExecution: noop, startReview: noop, continueReview: noop, continueFix: noop, openSession: noop },
   };
 }
+
+test('无项目看板固定只读执行方式，旧工作区字段也不会提供工作区选项', () => {
+  for (const inDrawer of [false, true]) {
+    for (const worktreePath of [undefined, '/old-worktree']) {
+      const data = fixture('idle', false, true);
+      data.board.board = { id: 'default', repo: null, projectDir: null, repoKey: null };
+      data.board.detail.task.worktreePath = worktreePath;
+      const html = renderDetail(data, inDrawer);
+      assert.ok(html.includes('native.projectless'));
+      assert.ok(!/<select\b[^>]*aria-label="native\.workspace"/.test(html));
+      assert.ok(!/<option\b[^>]*value="(?:project|worktree|existing)"/.test(html));
+    }
+  }
+});
+
+test('非 Git 项目只通过工作方式选项限制 worktree，沿用原有说明', () => {
+  const data = fixture('idle', false, true);
+  data.board.board = { id: 'default', repo: null, projectDir: '/plain-project', repoKey: null };
+  const html = renderDetail(data, false);
+  assert.ok(html.includes('value="project"'));
+  assert.ok(!html.includes('value="worktree"'));
+  assert.ok(!html.includes('native.nonGit.note'));
+  assert.ok(html.includes('native.ownership'));
+});
 
 for (const inDrawer of [false, true]) {
   test(`${inDrawer ? '宽抽屉' : '窄栏详情'}不展示消息控制区，保留会话打开与任务字段`, () => {
@@ -60,10 +84,12 @@ for (const inDrawer of [false, true]) {
           assert.ok(!/native\.(replyText|reply|retry|stop|reason\.stop)/.test(html));
           assert.equal(html.includes('native.open'), bound && connected);
           assert.ok(html.includes('detail.fieldDescription'));
-          assert.equal(html.includes('native.workspace'), connected);
+          assert.ok(html.includes('native.executionSection'));
+          assert.equal(html.includes('native.workspace'), connected && !bound);
           assert.equal(/<select\b[^>]*aria-label="native\.workspace"/.test(html), connected && !bound);
           assert.equal(html.includes('native.model.'), connected || bound);
-          assert.equal((html.match(/<textarea\b/g) ?? []).length, 1);
+          assert.equal((html.match(/<textarea\b/g) ?? []).length, bound && connected ? 2 : 1);
+          assert.equal(html.includes('native.continuePromptLabel'), bound && connected);
         }
       }
     }
@@ -173,9 +199,12 @@ test('详情仅在已保存真实绑定或完整 created 结果时显示打开�
 });
 
 for (const inDrawer of [false, true]) {
-  test(`${inDrawer ? '宽抽屉' : '窄详情'}blocked 展示原因、真实会话和核对继续，无结果则保留核对入口`, () => {
+  test(`${inDrawer ? '宽抽屉' : '窄详情'}blocked 保留原因、真实会话和核对后继续，但隐藏超时核对入口`, (t) => {
+    const now = Date.parse('2026-10-05T04:00:00.000Z');
+    t.mock.method(Date, 'now', () => now);
     const data = fixture('blocked', false, true);
     const request = { requestId: 'blocked-request', runId: 'blocked-run', action: 'start', status: 'blocked', workspaceMode: 'worktree',
+      updatedAt: new Date(now - 10 * 60_000).toISOString(),
       deliveryError: '工作区核验失败', result: { threadId: 'created-real', hostId: 'host', workspacePath: '/wt', workspaceOwner: 'codex' } };
     data.board.detail.task.execution.runId = request.runId;
     data.board.detail.task.executionRequests = [request];
@@ -187,7 +216,7 @@ for (const inDrawer of [false, true]) {
     assert.ok(html.includes('created-real'));
     assert.ok(html.includes('native.blocked.continue'));
     assert.ok(html.includes('native.open'));
-    assert.ok(html.includes('native.recovery.action'));
+    assert.ok(!html.includes('native.recovery.action'));
     assert.ok(!html.includes('native.start'));
     delete request.result;
     data.actions.reason = () => 'binding';
@@ -195,7 +224,7 @@ for (const inDrawer of [false, true]) {
     assert.ok(noResult.includes('native.blocked.noTarget'));
     assert.ok(!noResult.includes('native.open'));
     assert.match(noResult, /<button\b[^>]*disabled=""[^>]*>native\.blocked\.continue<\/button>/);
-    assert.ok(noResult.includes('native.recovery.action'));
+    assert.ok(!noResult.includes('native.recovery.action'));
   });
 }
 
@@ -209,6 +238,7 @@ for (const inDrawer of [false, true]) {
         data.board.hostSnapshot.connected = false;
         data.actions.status = 'pending';
         const html = renderDetail(data, inDrawer);
+        assert.ok(html.includes('native.executionSection'));
         assert.ok(!html.includes('native.workspace'));
         assert.equal(html.includes('native.model.'), bound);
         if (bound) {
@@ -271,27 +301,70 @@ test('卡片执行方与聊天状态在同一行 tag，不展示独立状态、�
 });
 
 for (const inDrawer of [false, true]) {
-  test(`${inDrawer ? '宽抽屉' : '窄详情'}运行、等待及终态均展示会话核对，断连或能力不支持时禁用`, () => {
-    for (const state of ['running', 'waiting', 'completed', 'failed', 'rejected', 'uncertain', 'blocked']) {
-      const data = fixture(state, true, true);
-      const request = { requestId: 'check-request', runId: 'check-run', action: 'start', status: state, workspaceMode: 'project' };
+  test(`${inDrawer ? '宽抽屉' : '窄详情'}创建链路超过五分钟展示会话核对，断连或能力不支持时禁用`, (t) => {
+    const now = Date.parse('2026-10-05T04:00:00.000Z');
+    t.mock.method(Date, 'now', () => now);
+    for (const status of ['pending', 'delivered', 'claimed', 'created', 'bound']) {
+      const data = fixture('starting', true, true);
+      const request = { requestId: 'check-request', runId: 'check-run', action: 'start', status, workspaceMode: 'project',
+        updatedAt: new Date(now - 5 * 60_000 - 1).toISOString() };
       data.board.detail.task.execution.runId = request.runId;
       data.board.detail.task.executionRequests = [request];
       data.actions.requests = [request];
+      data.actions.status = status;
       const html = renderDetail(data, inDrawer);
-      assert.match(html, /<button\b(?![^>]*disabled)[^>]*>native\.recovery\.action<\/button>/, state);
+      assert.match(html, /<button\b(?![^>]*disabled)[^>]*>native\.recovery\.action<\/button>/, status);
       for (const patch of [{ connected: false }, { capabilities: {} }, { info: { name: 'Unknown', version: 'test' } },
         { scope: { mode: 'project', lockedBoardId: 'different-board' } }]) {
         const original = data.board.hostSnapshot;
         data.board.hostSnapshot = { ...original, ...patch };
-        assert.match(renderDetail(data, inDrawer), /<button\b[^>]*disabled=""[^>]*>native\.recovery\.action<\/button>/, state);
+        assert.match(renderDetail(data, inDrawer), /<button\b[^>]*disabled=""[^>]*>native\.recovery\.action<\/button>/, status);
         data.board.hostSnapshot = original;
       }
+      data.board.conn = 'disconnected';
+      assert.match(renderDetail(data, inDrawer), /<button\b[^>]*disabled=""[^>]*>native\.recovery\.action<\/button>/, status);
+      data.board.conn = 'connected';
       data.board.detail.task.archivedAt = '2026-10-04T00:00:00.000Z';
       assert.ok(!renderDetail(data, inDrawer).includes('native.recovery.action'));
-      delete data.board.detail.task.archivedAt;
-      request.status = 'cancelled';
-      assert.ok(!renderDetail(data, inDrawer).includes('native.recovery.action'));
+    }
+  });
+
+  test(`${inDrawer ? '宽抽屉' : '窄详情'}会话核对严格检查请求状态、更新时间与当前轮次`, (t) => {
+    const now = Date.parse('2026-10-05T04:00:00.000Z');
+    t.mock.method(Date, 'now', () => now);
+    const timeCases = [
+      { label: '刚更新', updatedAt: new Date(now).toISOString(), visible: false },
+      { label: '未满五分钟', updatedAt: new Date(now - 5 * 60_000 + 1).toISOString(), visible: false },
+      { label: '恰好五分钟', updatedAt: new Date(now - 5 * 60_000).toISOString(), visible: false },
+      { label: '超过五分钟', updatedAt: new Date(now - 5 * 60_000 - 1).toISOString(), visible: true },
+      { label: '无效日期', updatedAt: 'invalid', visible: false },
+      { label: '缺少日期', updatedAt: undefined, visible: false },
+      { label: '未来日期', updatedAt: new Date(now + 1).toISOString(), visible: false },
+    ];
+    for (const status of ['pending', 'delivered', 'claimed', 'created', 'bound']) {
+      const data = fixture('starting', false, true);
+      const request = { requestId: 'check-request', runId: 'check-run', action: 'start', status, workspaceMode: 'project' };
+      data.board.detail.task.execution.runId = request.runId;
+      data.board.detail.task.executionRequests = [request];
+      data.actions.requests = [request];
+      data.actions.status = status;
+      for (const { label, updatedAt, visible } of timeCases) {
+        request.updatedAt = updatedAt;
+        assert.equal(renderDetail(data, inDrawer).includes('native.recovery.action'), visible, `${status}: ${label}`);
+      }
+      request.updatedAt = new Date(now - 10 * 60_000).toISOString();
+      data.board.detail.task.execution.runId = 'different-run';
+      assert.ok(!renderDetail(data, inDrawer).includes('native.recovery.action'), `${status}: 旧轮次`);
+    }
+    for (const status of ['blocked', 'uncertain', 'running', 'waiting', 'completed', 'failed', 'rejected', 'cancelled']) {
+      const data = fixture(status, true, true);
+      const request = { requestId: 'check-request', runId: 'check-run', action: 'start', status, workspaceMode: 'project',
+        updatedAt: new Date(now - 10 * 60_000).toISOString() };
+      data.board.detail.task.execution.runId = request.runId;
+      data.board.detail.task.executionRequests = [request];
+      data.actions.requests = [request];
+      data.actions.status = status;
+      assert.ok(!renderDetail(data, inDrawer).includes('native.recovery.action'), status);
     }
   });
 }

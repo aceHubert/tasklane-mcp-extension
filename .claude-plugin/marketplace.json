@@ -9,7 +9,7 @@
       "name": "tasklane",
       "source": "./plugins/tasklane",
       "description": "Shared task board with direct task submission from connected Codex panels, native chat binding before execution and correlated receipts.",
-      "version": "0.3.14"
+      "version": "0.3.20"
     }
   ]
 }

@@ -119,6 +119,58 @@ test('updateTask 编辑基础字段并校验', async () => {
   );
 });
 
+test('deadline：创建规范化为 UTC ISO，更新可设置、null 清除、非法值拒绝', async () => {
+  const { engine } = makeEngine();
+  // 无时区标记按 UTC 解析：结果不依赖测试进程时区（浏览器侧应提交带时区 ISO）
+  const created = await engine.createTask({ title: 'a', deadline: '2026-10-10T18:00' });
+  assert.equal(created.deadline, '2026-10-10T18:00:00.000Z');
+
+  const updated = await engine.updateTask({ id: created.id, deadline: '2026-10-20T00:00:00Z' });
+  assert.equal(updated.deadline, '2026-10-20T00:00:00.000Z');
+
+  const cleared = await engine.updateTask({ id: created.id, deadline: null });
+  assert.equal(cleared.deadline, undefined);
+
+  await assert.rejects(
+    engine.createTask({ title: 'b', deadline: 'not-a-date' }),
+    (err: BoardError) => err.code === 'VALIDATION',
+  );
+  await assert.rejects(
+    engine.updateTask({ id: created.id, deadline: '2026-13-01' }),
+    (err: BoardError) => err.code === 'VALIDATION',
+  );
+});
+
+test('deadline：拒绝不存在的日历日期与越界分量；闰年与显式偏移合法', async () => {
+  const { engine } = makeEngine();
+  // 2026 非闰年：02-30 / 02-29 不存在，不得静默滚动到 3 月
+  await assert.rejects(
+    engine.createTask({ title: 'a', deadline: '2026-02-30T18:00:00Z' }),
+    (err: BoardError) => err.code === 'VALIDATION',
+  );
+  await assert.rejects(
+    engine.createTask({ title: 'b', deadline: '2026-02-29' }),
+    (err: BoardError) => err.code === 'VALIDATION',
+  );
+  // 闰年 02-29 合法
+  const leap = await engine.createTask({ title: 'b', deadline: '2028-02-29T00:00:00Z' });
+  assert.equal(leap.deadline, '2028-02-29T00:00:00.000Z');
+  // 显式时区偏移换算为 UTC（+08:00 快 8 小时）
+  const offset = await engine.createTask({ title: 'c', deadline: '2026-10-10T18:00:00+08:00' });
+  assert.equal(offset.deadline, '2026-10-10T10:00:00.000Z');
+  // 越界时间分量拒绝（旧实现经 new Date 滚动到次日）
+  await assert.rejects(
+    engine.createTask({ title: 'd', deadline: '2026-10-10T24:00' }),
+    (err: BoardError) => err.code === 'VALIDATION',
+  );
+  // 短年份边界：Date.UTC 的两位年重映射不得把 0099 年变成 1999 年
+  const shortYear = await engine.createTask({ title: 'e', deadline: '0099-02-28T00:00:00Z' });
+  assert.equal(shortYear.deadline, '0099-02-28T00:00:00.000Z');
+  // 年 0 按闰年规则（可被 400 整除）接受 02-29，不得滚到 3 月
+  const yearZero = await engine.createTask({ title: 'f', deadline: '0000-02-29T00:00:00Z' });
+  assert.equal(yearZero.deadline, '0000-02-29T00:00:00.000Z');
+});
+
 test('task id 大小写不敏感；不存在抛 TASK_NOT_FOUND', async () => {
   const { engine } = makeEngine();
   await engine.createTask({ title: 'a' });
@@ -252,7 +304,7 @@ test('moveTask 流转校验基于磁盘最新状态：跨进程旧快照不得�
 /** 不依赖 git 的假看板注册：直接经存储层写入（引擎 registerBoard 的 Git 校验在 git-verify 覆盖） */
 function addBoard(
   store: JsonFileBoardStore,
-  input: { repoKey: string; repo: string; name: string; baseBranch: string },
+  input: { repoKey: string; repo: string; projectDir: string; name: string; baseBranch: string },
 ): string {
   const { board } = store.registerBoard(input);
   return board.id;
@@ -260,7 +312,7 @@ function addBoard(
 
 test('多看板下创建/列表省略 boardId 报 VALIDATION，不悄悄操作第一个看板', async () => {
   const { engine, store } = makeEngine();
-  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', name: 'B', baseBranch: 'main' });
+  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', projectDir: '/repos/b', name: 'B', baseBranch: 'main' });
 
   await assert.rejects(
     engine.createTask({ title: 'a' }),
@@ -295,7 +347,7 @@ test('单看板省略 boardId 自动解析；不存在的看板返回 BOARD_NOT_
 
 test('任务归属隔离：boardList 各自计数；过滤后不串板', async () => {
   const { engine, store } = makeEngine();
-  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', name: 'B', baseBranch: 'main' });
+  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', projectDir: '/repos/b', name: 'B', baseBranch: 'main' });
 
   const a1 = await engine.createTask({ title: 'a1', boardId: 'default', status: 'doing' });
   await engine.createTask({ title: 'a2', boardId: 'default', status: 'doing' });
@@ -320,7 +372,7 @@ test('任务归属隔离：boardList 各自计数；过滤后不串板', async (
 
 test('跨看板写操作校验：错误归属返回 BOARD_MISMATCH，不回退', async () => {
   const { engine, store } = makeEngine();
-  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', name: 'B', baseBranch: 'main' });
+  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', projectDir: '/repos/b', name: 'B', baseBranch: 'main' });
   const t = await engine.createTask({ title: 'a', boardId: 'default' });
 
   // get / update / move / assign 均校验归属
@@ -353,7 +405,7 @@ test('跨看板写操作校验：错误归属返回 BOARD_MISMATCH，不回退',
 
 test('任务 ID 全局唯一：跨看板取号不撞号', async () => {
   const { engine, store } = makeEngine();
-  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', name: 'B', baseBranch: 'main' });
+  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', projectDir: '/repos/b', name: 'B', baseBranch: 'main' });
   const a = await engine.createTask({ title: 'a', boardId: 'default' });
   const b = await engine.createTask({ title: 'b', boardId: boardB });
   assert.notEqual(a.id, b.id);
@@ -511,7 +563,7 @@ test('归档守卫在事务内基于磁盘最新状态执行：跨进程旧快�
 
 test('archiveDoneTasks：只归档指定看板未归档 done；空集合返回 0；其他看板不动', async () => {
   const { engine, store } = makeEngine();
-  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', name: 'B', baseBranch: 'main' });
+  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', projectDir: '/repos/b', name: 'B', baseBranch: 'main' });
 
   const d1 = await engine.createTask({ title: 'd1', boardId: 'default' });
   await driveToDone(engine, d1.id);
@@ -561,7 +613,7 @@ test('archiveDoneTasks：并发回退到 review 的任务不被归档（事务�
 
 test('归档任务的归属校验：错误看板 BOARD_MISMATCH；不存在看板 BOARD_NOT_FOUND', async () => {
   const { engine, store } = makeEngine();
-  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', name: 'B', baseBranch: 'main' });
+  const boardB = addBoard(store, { repoKey: '/repos/b/.git', repo: '/repos/b', projectDir: '/repos/b', name: 'B', baseBranch: 'main' });
   const t = await engine.createTask({ title: 'a', boardId: 'default' });
   await driveToDone(engine, t.id);
 
@@ -631,7 +683,7 @@ test('deleteTask：仅 backlog 可删，任务与时间线级联清理', async (
 test('deleteTask：已绑定或执行已推进的任务拒绝', async () => {
   const { engine, store } = makeEngine();
   // 原生执行请求要求看板绑定仓库；注册一个带固定路径的看板
-  const { board } = store.registerBoard({ repoKey: '/repos/del/.git', repo: '/repos/del', name: '删除守卫', baseBranch: 'main' });
+  const { board } = store.registerBoard({ repoKey: '/repos/del/.git', repo: '/repos/del', projectDir: '/repos/del', name: '删除守卫', baseBranch: 'main' });
   const t = await engine.createTask({ title: '执行链保护', boardId: board.id });
   await engine.requestExecution({ id: t.id, boardId: board.id, requestId: 'req-del-1', action: 'start', workspaceMode: 'project' });
   await assert.rejects(

@@ -1,6 +1,6 @@
 {
   "name": "tasklane",
-  "version": "0.3.14",
+  "version": "0.3.20",
   "description": "MCP-native task board for coding agent workflows. Open the native TaskLane panel through MCP from a project conversation or global navigation.",
   "author": {
     "name": "aceHubert"

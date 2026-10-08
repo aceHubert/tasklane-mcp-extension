@@ -456,7 +456,7 @@ test('五个原生 API 都拒绝错误看板，不串板或修改执行记录', 
   const { engine, store } = fixture;
   const { input, request } = await createRequested(fixture);
   await claimAndBind(engine, request);
-  const { board } = store.registerBoard({ repoKey: '/repos/b/.git', repo: '/repos/b', name: 'B', baseBranch: 'main' });
+  const { board } = store.registerBoard({ repoKey: '/repos/b/.git', repo: '/repos/b', projectDir: '/repos/b', name: 'B', baseBranch: 'main' });
   const before = snapshot(fixture, request.taskId);
   const wrong = { ...receipt(request), boardId: board.id };
   const calls = [
@@ -933,7 +933,7 @@ test('明确投递拒绝解除待确认，仅用户的新请求启动新代次�
   assert.equal(events.filter((event) => event.kind === 'started' || event.kind === 'failed').length, 0);
 });
 
-test('接收 Agent 在无创建结果时可明确拒绝，迟到面板拒绝和已有创建结果不可回退', async () => {
+test('接收 Agent 明确分发失败可结束请求，面板迟到失败和真实执行不可回退', async () => {
   const fixture = makeFixture();
   const { engine } = fixture;
   const { request } = await createRequested(fixture, { hostId: undefined, receiverThreadId: undefined });
@@ -953,16 +953,218 @@ test('接收 Agent 在无创建结果时可明确拒绝，迟到面板拒绝和�
   const binding = bindInput(other.request);
   await engine.claimExecution({ ...receipt(other.request), claimId: binding.claimId });
   await engine.bindExecution(binding);
-  for (const phase of ['created', 'bound', 'running'] as const) {
-    if (phase === 'bound') await engine.bindExecution({ ...binding, phase });
-    if (phase === 'running') await engine.reportExecution(reportInput(other.request));
-    const state = snapshot(fixture, other.request.taskId);
-    const lateReject = { ...receipt(other.request), status: 'rejected' as const, error: '迟到拒绝' };
-    await engine.markExecutionDelivery(lateReject);
-    await assert.rejects(engine.markExecutionDelivery({ ...lateReject, claimId: binding.claimId }), rejectsCode('EXECUTION_CONFLICT'));
-    assert.deepEqual(snapshot(fixture, other.request.taskId), state);
-  }
+  await engine.bindExecution({ ...binding, phase: 'bound' });
+  await engine.reportExecution(reportInput(other.request));
+  const state = snapshot(fixture, other.request.taskId);
+  const lateReject = { ...receipt(other.request), status: 'rejected' as const, error: '迟到拒绝' };
+  await engine.markExecutionDelivery(lateReject);
+  await assert.rejects(engine.markExecutionDelivery({ ...lateReject, claimId: binding.claimId }), rejectsCode('EXECUTION_CONFLICT'));
+  assert.deepEqual(snapshot(fixture, other.request.taskId), state);
   assert.equal(claimed.request.receiver?.hostId, 'codex-host-a');
+});
+
+test('已绑定续接消息被明确拒绝后解除启动等待，保留原聊天并允许用户新请求', async (t) => {
+  for (const action of ['continue', 'reply', 'retry'] as const) {
+    await t.test(action, async () => {
+      const fixture = makeFixture();
+      const { engine, file } = fixture;
+      const { request: original } = await createRequested(fixture);
+      await claimAndBind(engine, original);
+      await engine.reportExecution(reportInput(original));
+      await engine.reportExecution(reportInput(original, { reportId: 'original-completed', state: 'completed' }));
+      const binding = engine.getTask(original.taskId).executionBinding;
+      const input = requestInput(original.taskId, { requestId: 'continuation', action, message: '完整续接消息' });
+      const { request } = await engine.requestExecution(input);
+      await claimAndBind(engine, request);
+      const rejection = { ...receipt(request), claimId: 'claim-a', status: 'rejected' as const, error: 'send_message 被自动审批明确拒绝，消息未投递' };
+      const before = snapshot(fixture, request.taskId);
+      await assert.rejects(engine.markExecutionDelivery({ ...rejection, claimId: 'other-claim' }), rejectsCode('EXECUTION_CONFLICT'));
+      await engine.markExecutionDelivery({ ...rejection, claimId: undefined });
+      assert.deepEqual(snapshot(fixture, request.taskId), before);
+      const rejected = await engine.markExecutionDelivery(rejection);
+      assert.equal(rejected.request.status, 'rejected');
+      assert.equal(rejected.task.execution.state, 'assigned');
+      assert.equal(rejected.task.execution.startedAt, undefined);
+      assert.deepEqual(rejected.task.executionBinding, binding);
+      assert.deepEqual(rejected.request.result, before.task.executionRequests!.at(-1)!.result);
+      assert.equal(rejected.request.reports, undefined);
+      const after = snapshot(fixture, request.taskId);
+      await engine.markExecutionDelivery(rejection);
+      assert.deepEqual(snapshot(fixture, request.taskId), after);
+      assert.equal(new JsonFileBoardStore(file).getTask(request.taskId)!.executionRequests!.at(-1)!.status, 'rejected');
+      await assert.rejects(engine.reportExecution(reportInput(request, { reportId: 'late-running' })), rejectsCode('EXECUTION_CONFLICT'));
+      assert.equal((await engine.requestExecution(input)).created, false);
+      const next = await engine.requestExecution({ ...input, requestId: 'user-new-request' });
+      assert.equal(next.created, true);
+      assert.notEqual(next.request.runId, request.runId);
+      assert.deepEqual(next.task.executionBinding, binding);
+    });
+  }
+});
+
+test('任何启动分发阶段明确失败都结束等待，已知创建结果随新请求复用', async (t) => {
+  for (const stage of ['claimed', 'created', 'bound', 'blocked', 'uncertain'] as const) {
+    await t.test(stage, async () => {
+      const fixture = makeFixture();
+      const { engine, file } = fixture;
+      const { input, request } = await createRequested(fixture, { workspaceMode: 'worktree', model: 'original-model' });
+      await engine.claimExecution({ ...receipt(request), claimId: 'claim-a' });
+      const binding = bindInput(request, { workspacePath: '/worktrees/a', workspaceOwner: 'codex', branch: 'codex/task-a' });
+      if (['created', 'bound', 'blocked'].includes(stage)) await engine.bindExecution(binding);
+      if (stage === 'bound') await engine.bindExecution({ ...binding, phase: 'bound' });
+      if (stage === 'blocked' || stage === 'uncertain') {
+        await engine.markExecutionDelivery({ ...receipt(request), claimId: 'claim-a', status: stage, error: '任务准备阶段未完成' });
+      }
+      const before = engine.getTask(request.taskId);
+      const rejected = await engine.markExecutionDelivery({ ...receipt(request), claimId: 'claim-a', status: 'rejected', error: '已确认本轮分发失败，未开始任务' });
+      assert.equal(rejected.request.status, 'rejected');
+      assert.equal(rejected.task.execution.state, 'assigned');
+      assert.deepEqual(rejected.request.result, before.executionRequests!.at(-1)!.result);
+      assert.deepEqual(rejected.task.executionBinding, before.executionBinding);
+      assert.equal(new JsonFileBoardStore(file).getTask(request.taskId)!.executionRequests!.at(-1)!.status, 'rejected');
+      const retryInput = { ...input, requestId: 'user-new-dispatch', action: before.executionBinding ? 'continue' as const : 'start' as const, model: undefined };
+      const next = await engine.requestExecution(retryInput);
+      assert.equal(next.created, true);
+      assert.notEqual(next.request.runId, request.runId);
+      if (rejected.request.result) {
+        assert.deepEqual(next.request.result, rejected.request.result);
+        assert.deepEqual(next.request.recoveryOf, { requestId: request.requestId, runId: request.runId });
+        assert.equal(next.request.model, 'original-model');
+        assert.equal((await engine.requestExecution(retryInput)).created, false);
+      }
+    });
+  }
+});
+
+test('继承结果的恢复分发在认领前失败也结束等待，保留来源供再次发起', async () => {
+  const fixture = makeFixture();
+  const { engine, file } = fixture;
+  const { request: original } = await createRequested(fixture, { model: 'original-model' });
+  await claimAndBind(engine, original);
+  await engine.markExecutionDelivery({ ...receipt(original), claimId: 'claim-a', status: 'rejected', error: '原分发准备失败' });
+  const input = requestInput(original.taskId, { requestId: 'recovery', action: 'continue' });
+  const pending = await engine.requestExecution(input);
+  assert.equal(pending.request.claimId, undefined);
+  assert.equal(pending.request.result?.threadId, 'native-thread-a');
+  const rejected = await engine.markExecutionDelivery({ ...receipt(pending.request), status: 'rejected', error: '面板发送前上下文失效，未分发' });
+  assert.equal(rejected.request.status, 'rejected');
+  assert.equal(rejected.task.execution.state, 'assigned');
+  assert.equal(new JsonFileBoardStore(file).getTask(original.taskId)!.executionRequests!.at(-1)!.status, 'rejected');
+  const next = await engine.requestExecution({ ...input, requestId: 'another-user-request' });
+  assert.equal(next.created, true);
+  assert.deepEqual(next.request.result, pending.request.result);
+  assert.deepEqual(next.request.recoveryOf, { requestId: pending.request.requestId, runId: pending.request.runId });
+  assert.equal(next.request.model, 'original-model');
+});
+
+test('有模型的首次分发失败，任意续接动作可复用模型与已知结果', async (t) => {
+  for (const action of ['continue', 'reply', 'retry'] as const) {
+    await t.test(action, async () => {
+      const fixture = makeFixture();
+      const { engine, file } = fixture;
+      const { request: original } = await createRequested(fixture, { model: 'original-model' });
+      await claimAndBind(engine, original);
+      await engine.markExecutionDelivery({ ...receipt(original), claimId: 'claim-a', status: 'rejected', error: '首次任务明确未分发' });
+      const next = await engine.requestExecution(requestInput(original.taskId, { requestId: 'new-user-request', action, message: '完整新用户指令' }));
+      assert.equal(next.created, true);
+      assert.equal(next.request.model, 'original-model');
+      assert.equal(next.request.result?.threadId, 'native-thread-a');
+      assert.deepEqual(next.request.recoveryOf, { requestId: original.requestId, runId: original.runId });
+      assert.equal(new JsonFileBoardStore(file).getTask(original.taskId)!.executionRequests!.at(-1)!.model, 'original-model');
+    });
+  }
+});
+
+test('续接的目标真实回执不能被中间会话作为分发失败回退', async (t) => {
+  for (const phase of ['running', 'waiting', 'blocked', 'failed', 'completed'] as const) {
+    await t.test(phase, async () => {
+      const fixture = makeFixture();
+      const { engine } = fixture;
+      const { request: original } = await createRequested(fixture);
+      await claimAndBind(engine, original);
+      await engine.reportExecution(reportInput(original));
+      await engine.reportExecution(reportInput(original, { reportId: 'original-completed', state: 'completed' }));
+      const { request } = await engine.requestExecution(requestInput(original.taskId, { requestId: 'continuation', action: 'continue' }));
+      await engine.claimExecution({ ...receipt(request), claimId: 'claim-a' });
+      await engine.bindExecution(bindInput(request));
+      await engine.bindExecution(bindInput(request, { phase: 'bound' }));
+      // waiting / blocked / failed 允许在首次 running 前报告，同样证明目标已接手。
+      if (phase === 'running' || phase === 'completed') await engine.reportExecution(reportInput(request));
+      if (phase !== 'running') await engine.reportExecution(reportInput(request, { reportId: `target-${phase}`, state: phase, activity: '目标真实回执' }));
+      const before = snapshot(fixture, request.taskId);
+      await assert.rejects(engine.markExecutionDelivery({ ...receipt(request), claimId: 'claim-a', status: 'rejected', error: '迟到的消息拒绝' }), rejectsCode('EXECUTION_CONFLICT'));
+      assert.deepEqual(snapshot(fixture, request.taskId), before);
+    });
+  }
+});
+
+test('两个存储实例并发拒绝与真实 running，锁内只允许一个结果生效', async (t) => {
+  for (const first of ['rejection', 'running'] as const) {
+    await t.test(first, async () => {
+      const fixture = makeFixture();
+      const { engine, file, git } = fixture;
+      const { request: original } = await createRequested(fixture);
+      await claimAndBind(engine, original);
+      await engine.reportExecution(reportInput(original));
+      await engine.reportExecution(reportInput(original, { reportId: 'original-completed', state: 'completed' }));
+      const { request } = await engine.requestExecution(requestInput(original.taskId, { requestId: 'continuation', action: 'continue' }));
+      await claimAndBind(engine, request);
+      const target = new BoardEngine(new JsonFileBoardStore(file), git);
+      const reject = () => engine.markExecutionDelivery({ ...receipt(request), claimId: 'claim-a', status: 'rejected', error: '消息明确未发送' });
+      const run = () => target.reportExecution(reportInput(request));
+      const results = await Promise.allSettled(first === 'rejection' ? [reject(), run()] : [run(), reject()]);
+      assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+      assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+      const task = new JsonFileBoardStore(file).getTask(request.taskId)!;
+      const current = task.executionRequests!.at(-1)!;
+      assert.equal(current.status, first === 'rejection' ? 'rejected' : 'running');
+      assert.equal(task.execution.state, first === 'rejection' ? 'assigned' : 'running');
+      assert.equal(current.reports?.length ?? 0, first === 'rejection' ? 0 : 1);
+      assert.equal(current.startedAt !== undefined, first === 'running');
+    });
+  }
+});
+
+test('已绑定续接发送结果未知仍保留等待，不清理原结果或启动新轮', async () => {
+  const fixture = makeFixture();
+  const { engine } = fixture;
+  const { request: original } = await createRequested(fixture);
+  await claimAndBind(engine, original);
+  await engine.reportExecution(reportInput(original));
+  await engine.reportExecution(reportInput(original, { reportId: 'original-completed', state: 'completed' }));
+  const input = requestInput(original.taskId, { requestId: 'continuation', action: 'continue' });
+  const { request } = await engine.requestExecution(input);
+  await claimAndBind(engine, request);
+  const before = snapshot(fixture, request.taskId);
+  await engine.markExecutionDelivery({ ...receipt(request), claimId: 'claim-a', status: 'uncertain', error: '发送超时，结果未知' });
+  assert.deepEqual(snapshot(fixture, request.taskId), before);
+  await assert.rejects(engine.requestExecution({ ...input, requestId: 'unknown-new-attempt', message: '另一轮修改' }), rejectsCode('EXECUTION_BUSY'));
+});
+
+test('存储重读只允许无目标回执且匹配原绑定的 rejected 结果', async () => {
+  const fixture = makeFixture();
+  const { engine, file } = fixture;
+  const { request: original } = await createRequested(fixture);
+  await claimAndBind(engine, original);
+  await engine.reportExecution(reportInput(original));
+  await engine.reportExecution(reportInput(original, { reportId: 'original-completed', state: 'completed' }));
+  const { request } = await engine.requestExecution(requestInput(original.taskId, { requestId: 'continuation', action: 'continue' }));
+  await claimAndBind(engine, request);
+  await engine.markExecutionDelivery({ ...receipt(request), claimId: 'claim-a', status: 'rejected', error: '发送明确被拒绝' });
+  const raw = readFileSync(file, 'utf8');
+  const data = JSON.parse(raw) as { tasks: Record<string, WorkItem> };
+  for (const change of [
+    { startedAt: '2026-10-08T00:00:00.000Z' }, { claimId: undefined },
+    { reports: [{ reportId: 'target-waiting', state: 'waiting' }] },
+    { result: { ...engine.getTask(request.taskId).executionBinding, threadId: 'other-thread' } },
+  ]) {
+    const corrupt = structuredClone(data);
+    Object.assign(corrupt.tasks[request.taskId].executionRequests!.at(-1)!, change);
+    writeFileSync(file, JSON.stringify(corrupt));
+    assert.throws(() => new JsonFileBoardStore(file).getTask(request.taskId), rejectsCode('STORE_ERROR'));
+  }
+  writeFileSync(file, raw);
+  assert.equal(new JsonFileBoardStore(file).getTask(request.taskId)!.executionRequests!.at(-1)!.status, 'rejected');
 });
 
 test('未知投递和未知创建继续阻塞新请求，重复认领不能以超时抢占', async () => {
@@ -1021,7 +1223,7 @@ test('v4 重读校验新接收者和拒绝记录，拒绝未知状态及损坏�
     { hostId: 'codex-host-b' },
     { receiverThreadId: 'receiver-thread-b' },
     { status: 'rejected', deliveryError: '' },
-    { status: 'rejected', deliveryError: '明确拒绝', result: { threadId: 'native-thread-a', hostId: 'codex-host-a', workspacePath: '/repos/a', workspaceOwner: 'user' } },
+    { status: 'rejected', deliveryError: '明确拒绝', startedAt: '2026-10-08T00:00:00.000Z', result: { threadId: 'native-thread-a', hostId: 'codex-host-a', workspacePath: '/repos/a', workspaceOwner: 'user' } },
   ];
   for (const change of cases) {
     const data = structuredClone(original);
@@ -1054,7 +1256,7 @@ test('请求参数校验拒绝未绑定后续动作、无效标识及超长回�
   ];
   for (const change of invalid) await assert.rejects(engine.requestExecution({ ...input, ...change }), rejectsCode('VALIDATION'));
   assert.deepEqual(snapshot(fixture, task.id), before);
-  store.mutateBoard('default', (board) => ({ ...board, repo: null }));
+  store.mutateBoard('default', (board) => ({ ...board, repo: null, repoKey: null, projectDir: null }));
   await assert.rejects(engine.requestExecution(input), rejectsCode('VALIDATION'));
   assert.equal(engine.getTask(task.id).executionRequests, undefined);
 });

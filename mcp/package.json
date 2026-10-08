@@ -2,7 +2,7 @@
   "name": "@tasklane/mcp",
   "version": "0.1.0",
   "type": "module",
-  "description": "MCP server exposing the 7-tool Board contract: board_list / task_list / task_get / task_create / task_update / task_move / task_assign",
+  "description": "MCP server exposing the consolidated tool contract: board/task tools plus action-dispatched task_update and task_execution",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
   "bin": {

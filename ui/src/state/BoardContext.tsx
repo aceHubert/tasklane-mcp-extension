@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { McpClient, type ConnState, type BoardClient } from '../mcp/client';
-import { McpAppsClient, hasMcpAppsHost, type WidgetContext } from '../mcp/appsClient';
+import { McpAppsClient, hasMcpAppsHost, isReportCardResource, type ExecutionReportSnapshot, type WidgetContext } from '../mcp/appsClient';
 import { useLang } from '../i18n';
 import { emptyHostSnapshot, type ExecutionHost, type HostSnapshot } from '../host';
 import { translate } from '../i18n/messages';
@@ -51,6 +51,12 @@ interface BoardContextValue {
   widgetMode: WidgetMode;
   /** 项目模式上下文；global / project-error 时为 null */
   projectCtx: ProjectContext | null;
+  /** 报告资源初始显示紧凑卡片；仅点击并获宿主确认后进入完整看板。 */
+  reportCardVisible: boolean;
+  reportCard: ExecutionReportSnapshot | null;
+  reportCardError: string | null;
+  reportCardOpening: boolean;
+  openReportDetail(): Promise<void>;
   tasks: WorkItem[];
   loading: boolean;
   activeTab: TaskStatus;
@@ -101,6 +107,14 @@ export function BoardProvider({ children }: { children: ReactNode }) {
   const [boardsError, setBoardsError] = useState<string | null>(null);
   const [widgetMode, setWidgetMode] = useState<WidgetMode>('global');
   const [projectCtx, setProjectCtx] = useState<ProjectContext | null>(null);
+  const [reportCardVisible, setReportCardVisible] = useState(isReportCardResource);
+  const [reportCard, setReportCard] = useState<ExecutionReportSnapshot | null>(null);
+  const [reportCardError, setReportCardError] = useState<string | null>(null);
+  const [reportCardOpening, setReportCardOpening] = useState(false);
+  const reportCardVisibleRef = useRef(isReportCardResource());
+  const reportCardRef = useRef<ExecutionReportSnapshot | null>(null);
+  const reportOpenSeqRef = useRef(0);
+  const reportCardOpeningRef = useRef(false);
   const [tasks, setTasks] = useState<WorkItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TaskStatus>('doing');
@@ -108,6 +122,8 @@ export function BoardProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TaskDetailPayload | null>(null);
+  /** 报告卡片待聚焦任务（widget 上下文 taskId）：锁定看板任务加载完成后消费 */
+  const [pendingFocus, setPendingFocus] = useState<string | null>(null);
   const [archiveOpen, setArchiveOpenState] = useState(false);
   const [archivedTasks, setArchivedTasks] = useState<WorkItem[]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
@@ -117,6 +133,8 @@ export function BoardProvider({ children }: { children: ReactNode }) {
   // ref 与 state 同步维护：异步回调比对"发起时的看板 + 最新请求代次"，丢弃串板响应
   const boardIdRef = useRef<string | null>(null);
   const detailIdRef = useRef<string | null>(null);
+  /** 已聚焦过的任务：同一 widget 实例内重复上下文不重复打开详情 */
+  const focusedTaskRef = useRef<string | null>(null);
   /** 列表请求代次：每次发起新请求自增；旧响应（含 board_list → task_list 间隙的切换）一律作废 */
   const listSeqRef = useRef(0);
   /** 详情请求代次：旧响应后到不得覆盖新响应或回填已切换的详情 */
@@ -201,6 +219,8 @@ export function BoardProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     if (!client) return;
+    // 会话报告只读工具回执快照，不在用户点击前请求完整看板或详情。
+    if (reportCardVisibleRef.current) return;
     // 项目打开失败：保持错误空态，不请求任务（不显示其他仓库任务）
     if (widgetModeRef.current === 'project-error') return;
     const seq = ++listSeqRef.current;
@@ -291,6 +311,26 @@ export function BoardProvider({ children }: { children: ReactNode }) {
    */
   const applyWidgetContext = useCallback(
     (ctx: WidgetContext) => {
+      const report = ctx.presentation === 'report-card' || isReportCardResource();
+      reportCardVisibleRef.current = report;
+      setReportCardVisible(report);
+      reportCardRef.current = report ? ctx.reportCard ?? null : null;
+      setReportCard(reportCardRef.current);
+      setReportCardError(ctx.error ?? null);
+      reportOpenSeqRef.current += 1;
+      reportCardOpeningRef.current = false;
+      setReportCardOpening(false);
+      if (report) {
+        // 新报告回执撤销旧详情及在途读取，避免卡片未点击就打开上轮任务。
+        listSeqRef.current += 1;
+        detailSeqRef.current += 1;
+        detailIdRef.current = null;
+        setDetailId(null);
+        setDetail(null);
+        setTasks([]);
+        setPendingFocus(null);
+        setLoading(false);
+      }
       if (ctx.error) {
         widgetModeRef.current = 'project-error';
         setWidgetMode('project-error');
@@ -302,6 +342,7 @@ export function BoardProvider({ children }: { children: ReactNode }) {
         detailIdRef.current = null;
         setDetailId(null);
         setDetail(null);
+        setPendingFocus(null);
         setLoading(false);
         return;
       }
@@ -316,10 +357,12 @@ export function BoardProvider({ children }: { children: ReactNode }) {
         };
         projectCtxRef.current = next;
         setProjectCtx(next);
+        // 普通看板入口保留 taskId 聚焦；报告入口必须等待用户点击卡片。
+        setPendingFocus(report ? null : ctx.taskId ?? null);
         // 旧异步响应不能替换新 widget 的项目：即使全局模式已选中其他看板也强制回到锁定看板
         if (boardIdRef.current !== next.lockedBoardId) {
           applyBoardSelection(next.lockedBoardId);
-          loadBoardTasks(next.lockedBoardId);
+          if (!report) loadBoardTasks(next.lockedBoardId);
         }
         return;
       }
@@ -327,6 +370,7 @@ export function BoardProvider({ children }: { children: ReactNode }) {
       setWidgetMode('global');
       projectCtxRef.current = null;
       setProjectCtx(null);
+      setPendingFocus(null);
     },
     [applyBoardSelection, loadBoardTasks],
   );
@@ -377,6 +421,15 @@ export function BoardProvider({ children }: { children: ReactNode }) {
       if (cached) applyWidgetContextRef.current(cached);
       c.onWidgetContext = (ctx) => applyWidgetContextRef.current(ctx);
       c.onHostSnapshot = setHostSnapshot;
+      c.onDisplayMode = (mode) => {
+        if (mode !== 'inline' || !reportCardRef.current) return;
+        reportCardVisibleRef.current = true;
+        setReportCardVisible(true);
+        detailSeqRef.current += 1;
+        detailIdRef.current = null;
+        setDetailId(null);
+        setDetail(null);
+      };
       setClient(c);
       return;
     }
@@ -450,6 +503,48 @@ export function BoardProvider({ children }: { children: ReactNode }) {
     if (changed || !id) setDetail(null);
   }, []);
 
+  const openReportDetail = useCallback(async () => {
+    const card = reportCardRef.current;
+    const lockedBoardId = projectCtxRef.current?.lockedBoardId;
+    if (!(client instanceof McpAppsClient) || !card || !lockedBoardId || reportCardOpeningRef.current) return;
+    const seq = ++reportOpenSeqRef.current;
+    const version = client.getSnapshot().contextVersion;
+    setReportCardOpening(true);
+    reportCardOpeningRef.current = true;
+    setReportCardError(null);
+    try {
+      await client.expandReportCard(version, card.taskId, lockedBoardId);
+      if (seq !== reportOpenSeqRef.current || reportCardRef.current !== card ||
+        boardIdRef.current !== lockedBoardId || client.getSnapshot().contextVersion !== version) {
+        throw new Error(t('reportCard.contextChanged'));
+      }
+      reportCardVisibleRef.current = false;
+      setReportCardVisible(false);
+      openDetail(card.taskId);
+      void refresh();
+    } catch (err) {
+      // 上下文已换成另一张报告时，旧点击结果不能污染新卡片。
+      if (seq === reportOpenSeqRef.current) setReportCardError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === reportOpenSeqRef.current) {
+        reportCardOpeningRef.current = false;
+        setReportCardOpening(false);
+      }
+    }
+  }, [client, openDetail, refresh, t]);
+
+  // 普通看板入口携带 taskId：锁定看板任务加载完成后
+  // 打开该任务详情。同一实例对同一任务仅打开一次，重复上下文不重复弹详情；
+  // 归档任务不在活动列表中，仍可经 task_get 读取详情。
+  useEffect(() => {
+    if (!pendingFocus || loading) return;
+    if (focusedTaskRef.current !== pendingFocus) {
+      focusedTaskRef.current = pendingFocus;
+      openDetail(pendingFocus);
+    }
+    setPendingFocus(null);
+  }, [pendingFocus, loading, openDetail]);
+
   const call = useCallback(
     <T,>(name: string, args: Record<string, unknown> = {}) => {
       if (!client) return Promise.reject(new Error(translate('mcp.notConnected')));
@@ -506,6 +601,11 @@ export function BoardProvider({ children }: { children: ReactNode }) {
       boardsError,
       widgetMode,
       projectCtx,
+      reportCardVisible,
+      reportCard,
+      reportCardError,
+      reportCardOpening,
+      openReportDetail,
       tasks,
       loading,
       activeTab,
@@ -542,6 +642,11 @@ export function BoardProvider({ children }: { children: ReactNode }) {
       boardsError,
       widgetMode,
       projectCtx,
+      reportCardVisible,
+      reportCard,
+      reportCardError,
+      reportCardOpening,
+      openReportDetail,
       tasks,
       loading,
       activeTab,

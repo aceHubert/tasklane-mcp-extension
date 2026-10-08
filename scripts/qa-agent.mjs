@@ -2,7 +2,7 @@
 /**
  * 浏览器业务演示客户端：通过 ws://127.0.0.1:7433/mcp 调用业务工具，不启动或模拟 Agent。
  * 用法: node scripts/qa-agent.mjs <tool> '<json-args>'
- * 例:   node scripts/qa-agent.mjs task_update '{"id":"TASK-101","title":"演示标题"}'
+ * 例:   node scripts/qa-agent.mjs task_update '{"action":"update","id":"TASK-101","title":"演示标题"}'
  * 不提供 native 工具或 execution 回执；执行能力应由实际接收 Agent 单独验证。
  */
 import WebSocket from 'ws';
@@ -21,11 +21,12 @@ try {
 }
 const businessTools = new Set([
   'board_list', 'board_create', 'dir_list', 'task_list', 'task_get',
-  'task_create', 'task_update', 'task_move', 'task_assign',
+  'task_create', 'task_update', 'task_move',
   'task_archive', 'task_restore', 'task_archive_done',
 ]);
 if (!businessTools.has(tool) || !args || typeof args !== 'object' || Array.isArray(args) ||
-  (tool === 'task_update' && Object.hasOwn(args, 'execution'))) {
+  (tool === 'task_update' && Object.hasOwn(args, 'execution')) ||
+  (tool === 'task_update' && args.action === 'review')) {
   console.error('该脚本仅用于业务演示，不接受原生执行工具或 execution 状态写入。');
   process.exit(1);
 }

@@ -279,7 +279,7 @@ test('导出范围：scope 收窄与多看板必须显式指定 boardId', async 
   assert.equal(archived.stats.archived, 1);
   await assert.rejects(engine.exportTasks({ scope: 'bogus' as ExportScope }), rejectsCode('VALIDATION'));
 
-  store.registerBoard({ repoKey: '/repos/other/.git', repo: '/repos/other', name: '另一个看板', baseBranch: 'main' });
+  store.registerBoard({ repoKey: '/repos/other/.git', repo: '/repos/other', projectDir: '/repos/other', name: '另一个看板', baseBranch: 'main' });
   await assert.rejects(engine.exportTasks({}), rejectsCode('VALIDATION'));
   const scoped = await engine.exportTasks({ boardId: 'default' });
   assert.equal(scoped.boardId, 'default');

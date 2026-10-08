@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useBoard } from '../state/BoardContext';
 import { useLang } from '../i18n';
 import { statusKey } from '../i18n/messages';
-import { type Priority, type TaskStatus } from '../mcp/types';
+import { type Priority, type TaskStatus, localInputToIso } from '../mcp/types';
 import { XIcon } from './icons';
 
 const PRIORITIES: Priority[] = ['P0', 'P1', 'P2', 'P3'];
@@ -15,6 +15,8 @@ export function NewTaskForm({ onDone }: { onDone: () => void }) {
   const [desc, setDesc] = useState('');
   const [priority, setPriority] = useState<Priority>('P2');
   const [status, setStatus] = useState<TaskStatus>('ready');
+  /** 截止时间（datetime-local 本地值）；留空不设置 */
+  const [deadline, setDeadline] = useState('');
   const [submitting, setSubmitting] = useState(false);
   // 项目打开失败：无有效看板上下文，禁止创建（boardId 可能是错误前的陈旧值）
   const ctxBlocked = widgetMode === 'project-error';
@@ -31,6 +33,8 @@ export function NewTaskForm({ onDone }: { onDone: () => void }) {
         description: desc.trim() || undefined,
         priority,
         status,
+        // 留空不设置；本地时间在浏览器侧换算为带时区 ISO，避免服务端时区解析偏移
+        deadline: localInputToIso(deadline),
       });
       const id = res?.task?.id;
       if (!id) throw new Error(t('form.noTaskId'));
@@ -107,6 +111,15 @@ export function NewTaskForm({ onDone }: { onDone: () => void }) {
             ))}
           </div>
         </div>
+
+        <label className="field">
+          <span className="field-label">{t('form.deadline')}</span>
+          <input
+            type="datetime-local"
+            value={deadline}
+            onChange={(e) => setDeadline(e.target.value)}
+          />
+        </label>
 
         <div className="hint-note subtle">{t('form.plainHint')}</div>
 

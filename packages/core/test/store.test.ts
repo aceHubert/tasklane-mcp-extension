@@ -64,11 +64,41 @@ test('listTasks 支持按状态/指派过滤并按 ID 排序', () => {
   );
 });
 
+test('listTasks 未完成按 deadline 升序排前（无期限靠后），done 保持 ID 序', () => {
+  const store = new JsonFileBoardStore(tmpStoreFile());
+  store.putTask({ ...baseTask, id: 'TASK-101', title: '远', status: 'ready', priority: 'P2', deadline: '2026-10-20T00:00:00.000Z' });
+  store.putTask({ ...baseTask, id: 'TASK-102', title: '无期限', status: 'ready', priority: 'P2' });
+  store.putTask({ ...baseTask, id: 'TASK-103', title: '近', status: 'doing', priority: 'P1', deadline: '2026-10-05T00:00:00.000Z' });
+  store.putTask({ ...baseTask, id: 'TASK-104', title: '已完成', status: 'done', priority: 'P2', deadline: '2026-10-01T00:00:00.000Z' });
+  store.putTask({ ...baseTask, id: 'TASK-105', title: '已完成无期限', status: 'done', priority: 'P2' });
+
+  assert.deepEqual(
+    store.listTasks().map((t) => t.id),
+    // 未完成有 deadline 升序（103→101），无 deadline（102）随后；done 不参与截止排序、保持 ID 序
+    ['TASK-103', 'TASK-101', 'TASK-102', 'TASK-104', 'TASK-105'],
+  );
+  // 按状态过滤后同一规则在各状态子集内成立
+  assert.deepEqual(
+    store.listTasks({ status: 'ready' }).map((t) => t.id),
+    ['TASK-101', 'TASK-102'],
+  );
+});
+
+test('deadline 随任务持久化落盘并原样读回', () => {
+  const file = tmpStoreFile();
+  const store = new JsonFileBoardStore(file);
+  store.putTask({ ...baseTask, id: 'TASK-101', title: '带期限', status: 'ready', priority: 'P1', deadline: '2026-10-10T08:00:00.000Z' });
+
+  const reopened = new JsonFileBoardStore(file);
+  assert.equal(reopened.getTask('TASK-101')?.deadline, '2026-10-10T08:00:00.000Z');
+});
+
 test('listTasks 按看板过滤，互不混入', () => {
   const store = new JsonFileBoardStore(tmpStoreFile());
   const { board: boardB } = store.registerBoard({
     repoKey: '/repos/b/.git',
     repo: '/repos/b',
+    projectDir: '/repos/b',
     name: '项目 B',
     baseBranch: 'develop',
   });
@@ -178,7 +208,7 @@ test('v1 单看板旧数据升级：任务归属 default，保留会话与序号
   assert.equal(raw.version, 1);
   const again = new JsonFileBoardStore(file);
   assert.equal(again.getTask('TASK-101')?.boardId, 'default');
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 5);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 7);
 });
 
 test('v1 唯一非默认看板：任务归属该看板', () => {
@@ -235,6 +265,7 @@ test('registerBoard 锁内去重：同 repoKey 幂等返回已有看板，不改
   const first = store.registerBoard({
     repoKey: '/repos/a/.git',
     repo: '/repos/a',
+    projectDir: '/repos/a',
     name: '项目 A',
     baseBranch: 'main',
   });
@@ -244,6 +275,7 @@ test('registerBoard 锁内去重：同 repoKey 幂等返回已有看板，不改
   const dup = store.registerBoard({
     repoKey: '/repos/a/.git',
     repo: '/repos/a',
+    projectDir: '/repos/a',
     name: '改名尝试',
     baseBranch: 'develop',
   });
@@ -259,8 +291,8 @@ test('registerBoard 双实例并发：同一仓库只产生一个看板', () => 
   const a = new JsonFileBoardStore(file);
   const b = new JsonFileBoardStore(file);
   const [ra, rb] = [
-    a.registerBoard({ repoKey: '/repos/c/.git', repo: '/repos/c', name: 'C', baseBranch: 'main' }),
-    b.registerBoard({ repoKey: '/repos/c/.git', repo: '/repos/c', name: 'C2', baseBranch: 'main' }),
+    a.registerBoard({ repoKey: '/repos/c/.git', repo: '/repos/c', projectDir: '/repos/c', name: 'C', baseBranch: 'main' }),
+    b.registerBoard({ repoKey: '/repos/c/.git', repo: '/repos/c', projectDir: '/repos/c', name: 'C2', baseBranch: 'main' }),
   ];
   assert.equal(ra.board.id, rb.board.id);
   assert.equal(new JsonFileBoardStore(file).boards.filter((x) => x.repoKey === '/repos/c/.git').length, 1);
@@ -337,7 +369,7 @@ test('v2 → v4 升级：默认未归档，写入 .v2.bak 备份，重复打开�
 
   const raw = JSON.parse(readFileSync(`${file}.v2.bak`, 'utf8'));
   assert.equal(raw.version, 2); // 原始 v2 文件备份
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 5);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 7);
 
   // 重复打开：已是 v3，不再产生新备份或迁移
   const again = new JsonFileBoardStore(file);
@@ -383,13 +415,14 @@ test('listTasks archive 过滤：active/archived/all 与其他筛选叠加；und
   store.putTask({ ...baseTask, id: 'TASK-103', title: 'c', status: 'backlog', priority: 'P1' });
 
   // 存储默认只读取热任务，完整读取必须显式选择 all。
+  // 排序：未完成（103）排前，done 保持 ID 序在后。
   assert.deepEqual(
     store.listTasks().map((t) => t.id),
-    ['TASK-101', 'TASK-103'],
+    ['TASK-103', 'TASK-101'],
   );
   assert.deepEqual(
     store.listTasks({ archive: 'active' }).map((t) => t.id),
-    ['TASK-101', 'TASK-103'],
+    ['TASK-103', 'TASK-101'],
   );
   assert.deepEqual(
     store.listTasks({ archive: 'archived' }).map((t) => t.id),
@@ -397,7 +430,7 @@ test('listTasks archive 过滤：active/archived/all 与其他筛选叠加；und
   );
   assert.deepEqual(
     store.listTasks({ archive: 'all' }).map((t) => t.id),
-    ['TASK-101', 'TASK-102', 'TASK-103'],
+    ['TASK-103', 'TASK-101', 'TASK-102'],
   );
   // 归档范围 + 状态叠加
   assert.deepEqual(
@@ -502,7 +535,7 @@ test('v3 → v5 迁移保留归档、Git、旧运行和时间线且不制造真�
   assert.equal(store.getTask('TASK-101')?.executionBinding, undefined);
   assert.equal(store.nextId(), 'TASK-102');
   assert.equal(store.getSession('TASK-101')?.events.length, 1);
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 5);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 7);
   new JsonFileBoardStore(file);
   assert.equal(readFileSync(`${file}.v3.bak`, 'utf8'), original);
 });
@@ -544,7 +577,7 @@ test('事务发现旧版本时在已持有文件锁内迁移，不发生嵌套�
   writeFileSync(file, JSON.stringify({ version: 3, boards: [{ id: 'default', name: 'Board' }], tasks: { 'TASK-101': v2Task }, seq: 101 }));
   store.mutateTask('TASK-101', (task) => ({ ...task, title: 'updated' }));
   assert.equal(store.getTask('TASK-101')?.title, 'updated');
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 5);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 7);
 });
 
 test('迁移备份原子发布：上次中断留下截断临时文件不阻止重跑', () => {
@@ -556,7 +589,7 @@ test('迁移备份原子发布：上次中断留下截断临时文件不阻止�
 
   const store = new JsonFileBoardStore(file);
   assert.equal(store.getTask('TASK-101')?.id, 'TASK-101');
-  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 5);
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).version, 7);
   assert.equal(readFileSync(`${file}.v4.bak`, 'utf8'), original);
   assert.equal(readFileSync(interruptedBackup, 'utf8'), original.slice(0, 17));
   new JsonFileBoardStore(file);

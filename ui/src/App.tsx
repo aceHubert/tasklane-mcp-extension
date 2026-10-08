@@ -11,6 +11,7 @@ import { DisconnectedBanner } from './components/DisconnectedBanner';
 import { ArchivedView } from './components/ArchivedView';
 import { Toasts } from './components/Toasts';
 import { PlusIcon } from './components/icons';
+import { ExecutionReportCard } from './components/ExecutionReportCard';
 
 function useMedia(query: string): boolean {
   const [match, setMatch] = useState(() => matchMedia(query).matches);
@@ -73,14 +74,21 @@ function ArchiveLayer() {
   return <ArchivedView onClose={() => setArchiveOpen(false)} />;
 }
 
+function AppContent({ wide }: { wide: boolean }) {
+  const { reportCardVisible } = useBoard();
+  useEffect(() => {
+    document.documentElement.toggleAttribute('data-report-card', reportCardVisible);
+  }, [reportCardVisible]);
+  if (reportCardVisible) return <ExecutionReportCard />;
+  return <><BoardView wide={wide} /><ArchiveLayer /><Toasts /></>;
+}
+
 export default function App() {
   const wide = useMedia('(min-width: 760px)');
   return (
     <LangProvider>
       <BoardProvider>
-        <BoardView wide={wide} />
-        <ArchiveLayer />
-        <Toasts />
+        <AppContent wide={wide} />
       </BoardProvider>
     </LangProvider>
   );

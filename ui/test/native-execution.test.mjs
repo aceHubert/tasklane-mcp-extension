@@ -15,6 +15,48 @@ const h = await import(pathToFileURL(output).href);
 const task = { id: 'TASK-101', boardId: 'b', status: 'ready', execution: { state: 'assigned' } };
 const snapshot = { connected: true, identity: 'codex', info: { name: 'Codex', version: 'test' }, capabilities: { message: { text: {} }, openLinks: {} }, scope: { mode: 'project', lockedBoardId: 'b', repoRoot: '/repo' }, contextVersion: 1 };
 
+/** 看板能力视图（board_list 子集）：Git 项目看板，供执行守卫判定 */
+const board = { repo: '/repo', projectDir: '/repo', repoKey: '/repo/.git' };
+
+test('验收受阻时所有实现投递零 MCP 写入、零消息，并保留任务原值', async () => {
+  const binding = { provider: 'codex-desktop', threadId: 'impl', hostId: 'host', workspacePath: '/repo', workspaceOwner: 'user' };
+  for (const patch of [
+    { reviewExecution: { state: 'blocked', runId: 'review-run' } },
+    { reviewExecution: { state: 'completed', runId: 'review-run' },
+      executionRequests: [{ purpose: 'review', runId: 'review-run', status: 'blocked' }] },
+  ]) {
+    for (const action of ['start', 'continue', 'reply', 'retry']) {
+      const current = { ...task, execution: { state: 'completed' }, executionBinding: binding, ...patch };
+      const before = structuredClone(current);
+      let writes = 0; let messages = 0;
+      await assert.rejects(h.dispatchNativeExecution({ task: current, board, snapshot,
+        host: { getSnapshot: () => snapshot, sendMessage: async () => { messages++; } },
+        call: async () => { writes++; }, action, workspaceMode: 'project', message: '继续修改', isCurrent: () => true }),
+      /native.reason.reviewBlocked/);
+      assert.equal(writes, 0);
+      assert.equal(messages, 0);
+      assert.deepEqual(current, before);
+    }
+  }
+});
+
+test('验收受阻不拦截 purpose=review 的原验收续接投递', async () => {
+  const binding = { provider: 'codex-desktop', threadId: 'review', hostId: 'host', workspacePath: '/repo', workspaceOwner: 'user' };
+  const current = { ...task, status: 'review', execution: { state: 'completed' },
+    executionBinding: { ...binding, threadId: 'impl' }, reviewBinding: binding,
+    reviewExecution: { state: 'blocked', runId: 'review-run' } };
+  const calls = []; const messages = [];
+  const outcome = await h.dispatchNativeExecution({ task: current, board, snapshot,
+    host: { getSnapshot: () => snapshot, sendMessage: async text => { messages.push(text); } },
+    call: async (name, args) => {
+      calls.push({ name, args });
+      return args.action === 'request' ? { task: current, created: true, request: { ...args, runId: 'next-review' } } : {};
+    }, action: 'continue', purpose: 'review', workspaceMode: 'existing', isCurrent: () => true });
+  assert.equal(outcome, 'delivered');
+  assert.equal(calls[0].args.purpose, 'review');
+  assert.equal(messages.length, 1);
+});
+
 function statusCheckFixture(status = 'running') {
   const request = { requestId: 'check-request', runId: 'check-run', action: 'start', workspaceMode: 'worktree', status,
     receiver: { threadId: 'receiver', hostId: 'host' }, result: { threadId: 'target', hostId: 'host', workspacePath: '/wt', workspaceOwner: 'codex' } };
@@ -22,28 +64,25 @@ function statusCheckFixture(status = 'running') {
   return { request, current };
 }
 
-test('会话核对在运行和终态创建 status 请求，只发核对消息且不改原任务状态', async () => {
+test('会话核对直发消息：零 MCP 写入、不改原任务状态、提示词含新契约', async () => {
   for (const status of ['pending', 'claimed', 'running', 'waiting', 'blocked', 'completed', 'failed', 'rejected']) {
     const { request, current } = statusCheckFixture(status);
     const before = structuredClone(current);
     const calls = []; const messages = [];
     const outcome = await h.recoverPendingExecution({ task: current, request, snapshot,
       host: { getSnapshot: () => snapshot, sendMessage: async (text) => messages.push(text) },
-      call: async (name, args) => { calls.push({ name, args }); return { created: true,
-        request: { ...request, recoveryCheck: { checkId: args.checkId, purpose: args.purpose, status: 'pending' } } }; },
+      call: async (name, args) => { calls.push({ name, args }); return {}; },
       confirmed: true, isCurrent: () => true });
     assert.equal(outcome, 'sent');
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].name, 'task_execution_recovery_request');
-    assert.equal(calls[0].args.purpose, 'status');
-    assert.equal(calls[0].args.runId, request.runId);
+    assert.equal(calls.length, 0, '0.3.19 起核对消息不经 MCP 工具登记');
     assert.equal(messages.length, 1);
     assert.ok(messages[0].includes('仅核对会话状态并补齐看板回执'));
+    assert.ok(messages[0].includes('解除等待由用户在面板操作'));
     assert.ok(messages[0].includes('idle 只说明聊天空闲，不证明任务完成'));
     assert.ok(messages[0].includes('直接 read_thread'));
     assert.ok(messages[0].includes('终态不因聊天仍活跃而回退'));
+    assert.ok(messages[0].includes('task_execution action=report'));
     assert.ok(messages[0].includes('补回执后重新 task_get'));
-    assert.ok(messages[0].includes('禁止 outcome=stopped'));
     assert.ok(!messages[0].includes('按原授权恢复正文'));
     assert.deepEqual(current, before);
   }
@@ -72,62 +111,58 @@ test('会话核对未确认、宿主不支持、归档、取消、跨板或旧�
   }
 });
 
-test('会话核对已有 pending 检查不重复发送，写入失败不发送，宿主拒绝不伪造回执', async () => {
+test('会话核对宿主拒绝时不伪造回执，异常向上传播', async () => {
   const { request, current } = statusCheckFixture();
   let messages = 0;
-  const base = { task: current, request, snapshot, confirmed: true, isCurrent: () => true,
-    host: { getSnapshot: () => snapshot, sendMessage: async () => { messages++; } } };
-  assert.equal(await h.recoverPendingExecution({ ...base, call: async () => ({ created: false, request }) }), 'existing');
-  assert.equal(messages, 0);
-  await assert.rejects(h.recoverPendingExecution({ ...base, call: async () => { throw new Error('写入失败'); } }), /写入失败/);
-  assert.equal(messages, 0);
-  const calls = [];
-  await assert.rejects(h.recoverPendingExecution({ ...base,
-    host: { getSnapshot: () => snapshot, sendMessage: async () => { throw new Error('宿主拒绝'); } },
-    call: async (name, args) => { calls.push(name); return { created: true,
-      request: { ...request, recoveryCheck: { checkId: args.checkId, purpose: 'status' } } }; },
-  }), /宿主拒绝/);
-  assert.deepEqual(calls, ['task_execution_recovery_request']);
+  await assert.rejects(h.recoverPendingExecution({ task: current, request, snapshot, confirmed: true, isCurrent: () => true,
+    host: { getSnapshot: () => snapshot, sendMessage: async () => { messages++; throw new Error('宿主拒绝'); } },
+    call: async () => { throw new Error('不应有任何 MCP 写入'); } }), /宿主拒绝/);
+  assert.equal(messages, 1);
   assert.equal(current.execution.state, 'running');
 });
 
-test('会话核对请求保存后上下文或看板切换时不投递旧消息', async () => {
+test('会话核对上下文或看板切换时不投递旧消息', async () => {
   const { request, current } = statusCheckFixture();
-  for (const switchBoard of [true, false]) {
-    let fresh = snapshot; let isCurrent = true; let messages = 0;
-    await assert.rejects(h.recoverPendingExecution({ task: current, request, snapshot, confirmed: true,
-      isCurrent: () => isCurrent,
-      host: { getSnapshot: () => fresh, sendMessage: async () => { messages++; } },
-      call: async (_name, args) => {
-        if (switchBoard) isCurrent = false;
-        else fresh = { ...snapshot, contextVersion: snapshot.contextVersion + 1 };
-        return { created: true, request: { ...request, recoveryCheck: { checkId: args.checkId, purpose: 'status' } } };
-      },
-    }), /native.reason.context/);
+  for (const variant of ['isCurrent', 'contextVersion']) {
+    let messages = 0;
+    const input = { task: current, request, snapshot, confirmed: true,
+      isCurrent: () => variant !== 'isCurrent',
+      host: { getSnapshot: () => variant === 'contextVersion' ? { ...snapshot, contextVersion: snapshot.contextVersion + 1 } : snapshot,
+        sendMessage: async () => { messages++; } },
+      call: async () => { throw new Error('不应有任何 MCP 写入'); } };
+    await assert.rejects(h.recoverPendingExecution(input), /native.reason.context/);
     assert.equal(messages, 0);
   }
 });
 
-test('会话核对响应缺少purpose或关联身份错误时不投递', async () => {
-  const { request, current } = statusCheckFixture();
-  for (const patch of [{ requestId: 'other-request' }, { runId: 'other-run' }, { recoveryCheck: { checkId: 'check' } },
-    { recoveryCheck: { checkId: 'check', purpose: 'recover' } }, { recoveryCheck: undefined }]) {
-    let messages = 0;
-    await assert.rejects(h.recoverPendingExecution({ task: current, request, snapshot, confirmed: true,
-      isCurrent: () => true,
-      host: { getSnapshot: () => snapshot, sendMessage: async () => { messages++; } },
-      call: async (_name, args) => ({ created: true,
-        request: { ...request, recoveryCheck: { checkId: args.checkId, purpose: 'status' }, ...patch } }),
-    }), /native.reason.context/);
-    assert.equal(messages, 0);
-  }
+test('解除等待调用 app-only 工具：确认后取消请求，未确认或已解除时无重复写', async () => {
+  const { request, current } = statusCheckFixture('pending');
+  // 未确认：不产生任何调用
+  let calls = 0;
+  assert.equal(await h.releaseWaitingExecution({ task: current, request, confirmed: false, reason: '确认结束',
+    isCurrent: () => true, call: async () => { calls++; } }), 'existing');
+  assert.equal(calls, 0);
+  // 看板切换：拒绝写入
+  await assert.rejects(h.releaseWaitingExecution({ task: current, request, confirmed: true, reason: '确认结束',
+    isCurrent: () => false, call: async () => { calls++; } }), /native.reason.context/);
+  assert.equal(calls, 0);
+  // 正常解除：调用 task_execution_recover 并透传 changed
+  const seen = [];
+  assert.equal(await h.releaseWaitingExecution({ task: current, request, confirmed: true, reason: '用户确认旧会话已结束', isCurrent: () => true,
+    call: async (name, args) => { seen.push({ name, args }); return { request: { ...request, status: 'cancelled' }, changed: true }; } }), 'released');
+  assert.deepEqual(seen.map((entry) => entry.name), ['task_execution_recover']);
+  assert.equal(seen[0].args.reason, '用户确认旧会话已结束');
+  assert.equal(seen[0].args.runId, request.runId);
+  // 重复解除：changed=false 归类为 existing
+  assert.equal(await h.releaseWaitingExecution({ task: current, request, confirmed: true, reason: '重复', isCurrent: () => true,
+    call: async () => ({ request: { ...request, status: 'cancelled' }, changed: false }) }), 'existing');
 });
 
 test('未知/其他宿主/握手未完成/范围无效/无消息能力均零写入', async () => {
   for (const patch of [ { connected: false }, { info: { name: 'ChatGPT', version: 'test' } }, { scope: undefined }, { scope: { mode: 'project-error' } }, { capabilities: {} } ]) {
     let writes = 0; let messages = 0;
     const s = { ...snapshot, ...patch };
-    await assert.rejects(h.dispatchNativeExecution({ task, repo: '/repo', snapshot: s, host: { getSnapshot: () => s, sendMessage: async () => { messages++; } }, call: async () => { writes++; }, action: 'start', workspaceMode: 'project', isCurrent: () => true }));
+    await assert.rejects(h.dispatchNativeExecution({ task, board, snapshot: s, host: { getSnapshot: () => s, sendMessage: async () => { messages++; } }, call: async () => { writes++; }, action: 'start', workspaceMode: 'project', isCurrent: () => true }));
     assert.equal(writes, 0); assert.equal(messages, 0);
   }
   assert.equal(h.hostIdentity({ name: 'Codex clone', version: 'test' }), 'unknown');
@@ -135,30 +170,84 @@ test('未知/其他宿主/握手未完成/范围无效/无消息能力均零写�
 });
 
 test('未选择工作方式/已有工作区错误方式/跨板均拒绝', () => {
-  assert.equal(h.executionBlockReason(snapshot, task, '/repo', 'start'), 'selection');
-  assert.equal(h.executionBlockReason(snapshot, { ...task, worktreePath: '/repo/.worktrees/old' }, '/repo', 'start', 'worktree'), 'workspace');
-  assert.equal(h.executionBlockReason(snapshot, { ...task, boardId: 'other' }, '/repo', 'start', 'project'), 'context');
-  assert.equal(h.executionBlockReason(snapshot, { ...task, worktreePath: '/repo/.worktrees/old' }, '/repo', 'start', 'existing'), null);
-  assert.equal(h.executionBlockReason(snapshot, { ...task, archivedAt: '2026-10-04' }, '/repo', 'start', 'project'), 'archived');
-  assert.equal(h.executionBlockReason(snapshot, { ...task, status: 'done' }, '/repo', 'start', 'project'), 'done');
-  assert.equal(h.executionBlockReason(snapshot, { ...task, execution: { state: 'running', runId: 'actual-run' } }, '/repo', 'start', 'project'), 'busy');
+  assert.equal(h.executionBlockReason(snapshot, task, board, 'start'), 'selection');
+  assert.equal(h.executionBlockReason(snapshot, { ...task, worktreePath: '/repo/.worktrees/old' }, board, 'start', 'worktree'), 'workspace');
+  assert.equal(h.executionBlockReason(snapshot, { ...task, boardId: 'other' }, board, 'start', 'project'), 'context');
+  assert.equal(h.executionBlockReason(snapshot, { ...task, worktreePath: '/repo/.worktrees/old' }, board, 'start', 'existing'), null);
+  assert.equal(h.executionBlockReason(snapshot, { ...task, archivedAt: '2026-10-04' }, board, 'start', 'project'), 'archived');
+  assert.equal(h.executionBlockReason(snapshot, { ...task, status: 'done' }, board, 'start', 'project'), 'done');
+  assert.equal(h.executionBlockReason(snapshot, { ...task, execution: { state: 'running', runId: 'actual-run' } }, board, 'start', 'project'), 'busy');
+  // 无项目看板只接受 projectless；非 Git 项目（无 Git 能力）禁用 worktree
+  const projectlessBoard = { repo: null, projectDir: null, repoKey: null };
+  assert.equal(h.executionBlockReason(snapshot, task, projectlessBoard, 'start', 'project'), 'repo');
+  assert.equal(h.executionBlockReason(snapshot, task, projectlessBoard, 'start', 'projectless'), null);
+  const plainSnapshot = { ...snapshot, scope: { ...snapshot.scope, repoRoot: '/plain' } };
+  const plainProject = { repo: null, projectDir: '/plain', repoKey: null };
+  assert.equal(h.executionBlockReason(plainSnapshot, task, plainProject, 'start', 'worktree'), 'gitUnavailable');
+  assert.equal(h.executionBlockReason(plainSnapshot, task, plainProject, 'start', 'project'), null);
 });
 
 function callFactory(created = true) {
   const calls = [];
   const call = async (name, args) => {
     calls.push({ name, args });
-    if (name === 'task_execution_request') return { task, created, request: { ...args, taskId: args.id, repo: '/repo', runId: 'run-real' } };
-    if (name === 'task_execution_delivery') return { request: { ...args } };
+    if (name === 'task_execution' && args.action === 'request') return { task, created, request: { ...args, taskId: args.id, repo: '/repo', runId: 'run-real' } };
+    if (name === 'task_execution' && args.action === 'delivery') return { request: { ...args } };
     return {};
   };
   return { call, calls };
 }
 
+test('Review 创建在主项目 local 聊天中分发实际 worktree 审查提示词', async () => {
+  const workspacePath = '/repo/.worktrees/implementation';
+  const reviewTask = { ...task, status: 'review', execution: { state: 'completed' },
+    executionBinding: { provider: 'codex-desktop', threadId: 'impl', hostId: 'host',
+      workspacePath, workspaceOwner: 'codex', branch: 'codex/implementation' } };
+  const calls = []; let delivered = '';
+  await h.dispatchNativeExecution({ task: reviewTask, board, snapshot,
+    host: { getSnapshot: () => snapshot, sendMessage: async (text) => { delivered = text; } },
+    call: async (name, args) => {
+      calls.push({ name, args });
+      return name === 'task_execution' && args.action === 'request' ? { task: reviewTask, created: true,
+        request: { ...args, runId: 'review-run', repo: '/repo', workspacePath } } : {};
+    }, action: 'start', purpose: 'review', workspaceMode: 'existing', isCurrent: () => true });
+  assert.equal(calls[0].args.purpose, 'review');
+  assert.equal(calls[0].args.workspaceMode, 'existing');
+  assert.ok(delivered.includes('board’s main project'));
+  assert.ok(delivered.includes('local environment'));
+  assert.ok(!/[\u4e00-\u9fff]/.test(delivered));
+  const prompt = delivered.split('Review request begins:')[1].split('Review request ends.')[0];
+  assert.ok(prompt.includes(workspacePath));
+  assert.ok(prompt.includes('current directory is not the review target'));
+  assert.ok(prompt.includes('repository identity, current branch and changes'));
+  assert.ok(prompt.includes('task_update action=review'));
+  assert.ok(!prompt.includes('禁止创建新工作区或切换目录'));
+});
+
+test('Review 复查复用验收聊天，不再向目标聊天重复目录提示', async () => {
+  const binding = { provider: 'codex-desktop', threadId: 'review', hostId: 'host',
+    workspacePath: '/repo/.worktrees/implementation', workspaceOwner: 'codex' };
+  const reviewTask = { ...task, status: 'review', execution: { state: 'completed' },
+    executionBinding: { ...binding, threadId: 'impl' }, reviewBinding: binding,
+    review: { status: 'recheck_pending', revision: 2 }, reviewExecution: { state: 'completed' } };
+  let delivered = '';
+  await h.dispatchNativeExecution({ task: reviewTask, board, snapshot,
+    host: { getSnapshot: () => snapshot, sendMessage: async (text) => { delivered = text; } },
+    call: async (name, args) => name === 'task_execution' && args.action === 'request' ? { task: reviewTask, created: true,
+      request: { ...args, runId: 'recheck-run', repo: '/repo', workspacePath: binding.workspacePath } } : {},
+    action: 'continue', purpose: 'review', workspaceMode: 'existing', isCurrent: () => true });
+  const prompt = delivered.split('Review request begins:')[1].split('Review request ends.')[0];
+  assert.ok(prompt.includes('Continue reviewing'));
+  assert.ok(!prompt.includes(binding.workspacePath));
+  assert.ok(!prompt.includes('working directory'));
+  assert.ok(!delivered.includes('board’s main project'));
+  assert.ok(!/[\u4e00-\u9fff]/.test(delivered));
+});
+
 test('无声明的新请求直接投递，不伪造身份；重复请求不再次发送', async () => {
   for (const created of [true, false]) {
     const { call, calls } = callFactory(created); const messages = [];
-    const outcome = await h.dispatchNativeExecution({ task, repo: '/repo', snapshot, host: { getSnapshot: () => snapshot, sendMessage: async (text) => messages.push(text) }, call, action: 'start', workspaceMode: 'project', isCurrent: () => true });
+    const outcome = await h.dispatchNativeExecution({ task, board, snapshot, host: { getSnapshot: () => snapshot, sendMessage: async (text) => messages.push(text) }, call, action: 'start', workspaceMode: 'project', isCurrent: () => true });
     assert.equal(outcome, created ? 'delivered' : 'existing'); assert.equal(messages.length, created ? 1 : 0);
     assert.ok(!calls.some((c) => c.args.execution?.state === 'running'));
     if (created) {
@@ -171,7 +260,7 @@ test('无声明的新请求直接投递，不伪造身份；重复请求不再�
       assert.ok(messages[0].includes('clientThreadId'));
       assert.ok(messages[0].includes('异常也必须写回看板'));
       assert.ok(messages[0].includes('不能等所有准备成功才保存会话'));
-      assert.ok(messages[0].includes('task_execution_report state=failed'));
+      assert.ok(messages[0].includes('task_execution action=report state=failed'));
       assert.ok(messages[0].includes('结束前 task_get 确认'));
       assert.ok(messages[0].includes('先使用宿主 list_threads/read_thread'));
     }
@@ -183,7 +272,7 @@ test('三种工作方式仅创建一次即结束，绑定与回执交给执行�
     const current = { ...task, title: '仅 MCP 查询可读的任务标题', description: '仅 MCP 查询可读的任务步骤',
       ...(workspaceMode === 'existing' ? { worktreePath: '/wt' } : {}) };
     const { call, calls } = callFactory(); let text = '';
-    await h.dispatchNativeExecution({ task: current, repo: '/repo', snapshot,
+    await h.dispatchNativeExecution({ task: current, board, snapshot,
       host: { getSnapshot: () => snapshot, sendMessage: async value => { text = value; } },
       call: async (name, args) => {
         const response = await call(name, args);
@@ -226,9 +315,9 @@ test('三种工作方式仅创建一次即结束，绑定与回执交给执行�
     assert.match(text, /不等待[^\n]*不获取目标身份[^\n]*不保存绑定[^\n]*不移动/);
     assert.match(text, /clientThreadId[^\n]*正常返回[^\n]*不得[^\n]*(?:真实|绑定)/);
     assert.match(text, /(?:新会话|新聊天)[^\n]*(?:自行|自己)[^\n]*(?:核验|绑定)/);
-    assert.match(text, /(?:拒绝|失败)[^\n]*task_execution_delivery[^\n]*(?:rejected|uncertain)/);
+    assert.match(text, /(?:拒绝|失败)[^\n]*task_execution action=delivery[^\n]*(?:rejected|uncertain)/);
     assert.ok(text.includes('claimId'));
-    assert.ok(text.includes('task_execution_report'));
+    assert.ok(text.includes('task_execution action=report'));
     assert.ok(text.includes('phase=created'));
     assert.ok(text.includes('task_get'));
     assert.match(text, /task_get[^\n]*(?:完整任务|步骤|任务)/);
@@ -249,9 +338,9 @@ test('续接和已创建恢复复用原聊天，不创建或重新准备新聊�
   for (const action of ['continue', 'retry', 'reply', 'start']) {
     let text = '';
     const current = action === 'start' ? { ...task, executionRequests: [{ ...original, status: 'cancelled' }] } : bound;
-    await h.dispatchNativeExecution({ task: current, repo: '/repo', snapshot,
+    await h.dispatchNativeExecution({ task: current, board, snapshot,
       host: { getSnapshot: () => snapshot, sendMessage: async value => { text = value; } },
-      call: async (name, args) => name === 'task_execution_request'
+      call: async (name, args) => name === 'task_execution' && args.action === 'request'
         ? { task: current, created: true, request: { ...args, runId: 'new-run', repo: '/repo',
           ...(action === 'start' ? { recoveryOf: original.requestId, result: binding } : {}) } }
         : { request: { status: 'delivered' } },
@@ -267,7 +356,7 @@ test('续接和已创建恢复复用原聊天，不创建或重新准备新聊�
 test('创建请求保存规范化模型并在原生消息中要求原样传递，默认不传模型', async () => {
   for (const model of [undefined, '  available-model-id  ']) {
     const { call, calls } = callFactory(); let delivered = '';
-    await h.dispatchNativeExecution({ task, repo: '/repo', snapshot,
+    await h.dispatchNativeExecution({ task, board, snapshot,
       host: { getSnapshot: () => snapshot, sendMessage: async (text) => { delivered = text; } },
       call, action: 'start', workspaceMode: 'project', model, isCurrent: () => true });
     if (model) {
@@ -284,7 +373,7 @@ test('创建请求保存规范化模型并在原生消息中要求原样传递�
 test('无效模型在写入和消息投递前拒绝', async () => {
   for (const model of ['', '  ', 'bad model', '$invalid', 'a'.repeat(129)]) {
     let writes = 0; let messages = 0;
-    await assert.rejects(h.dispatchNativeExecution({ task, repo: '/repo', snapshot,
+    await assert.rejects(h.dispatchNativeExecution({ task, board, snapshot,
       host: { getSnapshot: () => snapshot, sendMessage: async () => { messages++; } },
       call: async () => { writes++; }, action: 'start', workspaceMode: 'project', model, isCurrent: () => true }),
     { message: 'native.model.invalid' });
@@ -308,7 +397,7 @@ test('模型展示来自当前待处理请求或匹配绑定的创建记录，�
   assert.equal(h.creationModelRequest({ ...bound, executionBinding: { ...binding, hostId: 'other' } }), undefined);
   for (const action of ['continue', 'retry', 'reply']) {
     const { call, calls } = callFactory(); let delivered = '';
-    await h.dispatchNativeExecution({ task: bound, repo: '/repo', snapshot,
+    await h.dispatchNativeExecution({ task: bound, board, snapshot,
       host: { getSnapshot: () => snapshot, sendMessage: async (text) => { delivered = text; } },
       call, action, workspaceMode: 'worktree', model: 'another-model',
       ...(action === 'reply' ? { message: '完整回复' } : {}), isCurrent: () => true });
@@ -317,22 +406,128 @@ test('模型展示来自当前待处理请求或匹配绑定的创建记录，�
   }
 });
 
-test('完整回复不截断，续接保持原工作区模式', async () => {
+test('完整回复与继续执行提示词不截断，续接保持原工作区模式', async () => {
   const binding = { provider: 'codex-desktop', threadId: 'thread', hostId: 'host', workspacePath: '/wt', workspaceOwner: 'codex' };
   const bound = { ...task, executionBinding: binding, execution: { state: 'waiting' }, executionRequests: [{ result: binding, workspaceMode: 'worktree' }] };
   assert.equal(h.boundWorkspaceMode(bound), 'worktree');
-  const message = '完整回复\n'.repeat(300); let delivered = '';
-  const { call, calls } = callFactory();
-  await h.dispatchNativeExecution({ task: bound, repo: '/repo', snapshot, host: { getSnapshot: () => snapshot, sendMessage: async (text) => { delivered = text; } }, call, action: 'reply', workspaceMode: 'worktree', message, isCurrent: () => true });
-  assert.equal(calls[0].args.message, message); assert.ok(delivered.includes(message));
+  for (const action of ['reply', 'continue']) {
+    const message = '用户编辑后的完整提示词\n'.repeat(300); let delivered = '';
+    const { call, calls } = callFactory();
+    await h.dispatchNativeExecution({ task: bound, board, snapshot, host: { getSnapshot: () => snapshot, sendMessage: async (text) => { delivered = text; } }, call, action, workspaceMode: 'worktree', message, isCurrent: () => true });
+    assert.equal(calls[0].args.message, message); assert.ok(delivered.includes(message));
+  }
+});
+
+test('首次分发、所有实现续接和验收复查均包含通用明确失败恢复分支', async () => {
+  const binding = { provider: 'codex-desktop', threadId: 'target', hostId: 'host', workspacePath: '/repo', workspaceOwner: 'user' };
+  for (const [purpose, action] of [
+    ['implementation', 'start'], ['implementation', 'continue'], ['implementation', 'reply'], ['implementation', 'retry'], ['review', 'start'], ['review', 'continue'],
+  ]) {
+    const review = purpose === 'review';
+    const current = { ...task, executionBinding: action === 'start' && !review ? undefined : binding, execution: { state: 'completed' },
+      ...(review ? { status: 'review', reviewBinding: action === 'start' ? undefined : { ...binding, threadId: 'review-target' },
+        reviewExecution: { state: 'completed' }, review: { status: action === 'start' ? 'pending' : 'recheck_pending', revision: 2 } } : {}) };
+    const calls = []; let text = '';
+    const outcome = await h.dispatchNativeExecution({ task: current, board, snapshot,
+      host: { getSnapshot: () => snapshot, sendMessage: async value => { text = value; } },
+      call: async (name, args) => {
+        calls.push({ name, args });
+        return args.action === 'request' ? { task: current, created: true,
+          request: { ...args, runId: 'next-run', repo: '/repo' } } : { request: { status: 'delivered' } };
+      }, action, purpose, workspaceMode: review ? 'existing' : 'project', message: '完整请求正文', isCurrent: () => true });
+    assert.equal(outcome, 'delivered');
+    assert.equal(calls[0].args.requestAction, action);
+    assert.equal(calls[0].args.purpose, purpose);
+    const correlationLine = text.split('\n').find(line => line.startsWith(review ? 'Correlation' : '关联信息'));
+    const correlation = JSON.parse(correlationLine.slice(correlationLine.indexOf('：') + 1));
+    assert.equal(correlation.id, current.id);
+    assert.equal(correlation.boardId, current.boardId);
+    assert.equal(correlation.requestId, calls[0].args.requestId);
+    assert.equal(correlation.runId, 'next-run');
+    const recovery = text.split('\n').find(line => line.includes('send_message_to_thread') && line.includes('status=rejected'));
+    assert.ok(recovery, `${purpose}/${action} 缺少原生目标投递拒绝恢复指令`);
+    for (const token of ['id/boardId/requestId/runId', 'claimId', 'task_execution action=delivery',
+      'startedAt', 'reports', 'starting', 'claimed', 'created', 'bound', 'result/binding', 'task_get',
+      'blocked', 'failed', 'running/completed', 'uncertain']) assert.ok(recovery.includes(token), `缺少 ${token}`);
+    assert.ok(text.includes('完整请求正文'));
+    if (review) {
+      assert.ok(recovery.includes('Any confirmed task dispatch failure'));
+      assert.ok(recovery.includes('preparation or binding failure'));
+      assert.ok(recovery.includes('nonempty error'));
+      assert.ok(recovery.includes('reviewExecution is idle'));
+      assert.ok(recovery.includes('review business status unchanged'));
+      assert.ok(recovery.includes('Do not automatically retry'));
+      assert.ok(recovery.includes('start/reply/continue/retry'));
+    } else {
+      assert.ok(recovery.includes('任何明确的任务分发失败'));
+      assert.ok(recovery.includes('执行前准备或绑定明确失败'));
+      assert.ok(recovery.includes('非空 error'));
+      assert.ok(recovery.includes('execution 为 assigned/idle'));
+      assert.ok(recovery.includes('业务状态未改变'));
+      assert.ok(recovery.includes('不自动重试'));
+      assert.ok(recovery.includes('start/reply/continue/retry'));
+    }
+    assert.deepEqual(calls.map(entry => entry.args.action), ['request', 'delivery']);
+  }
+});
+
+test('首次创建指令开放明确失败恢复，仍保留创建未知保护', async () => {
+  const { call } = callFactory(); let text = '';
+  await h.dispatchNativeExecution({ task, board, snapshot,
+    host: { getSnapshot: () => snapshot, sendMessage: async value => { text = value; } },
+    call, action: 'start', workspaceMode: 'project', isCurrent: () => true });
+  assert.ok(!text.includes('send_message_to_thread 被自动审核明确拒绝'));
+  assert.ok(text.includes('创建已发起或结果未知时禁止重复 create_thread'));
+  assert.ok(text.includes('创建或绑定结果待确认'));
+  assert.ok(text.includes('只有 clientThreadId 时不得冒充真实会话ID'));
+  assert.ok(text.includes('创建明确失败时写 delivery rejected'));
+});
+
+test('明确失败的实现与首次验收恢复必须复用真实结果，保持模型且禁止新建', async () => {
+  const saved = { threadId: 'saved-thread', hostId: 'host', workspacePath: '/repo', workspaceOwner: 'user' };
+  for (const purpose of ['implementation', 'review']) {
+    const review = purpose === 'review';
+    const source = { requestId: 'failed-request', runId: 'failed-run', purpose, action: 'start',
+      status: 'rejected', workspaceMode: review ? 'existing' : 'project', result: saved, model: 'saved-model' };
+    const current = { ...task, execution: { state: review ? 'completed' : 'idle', runId: review ? 'impl-run' : source.runId },
+      executionRequests: [source], ...(review ? { status: 'review', executionBinding: { provider: 'codex-desktop',
+        ...saved, threadId: 'implementation-thread' }, reviewBinding: { provider: 'codex-desktop', ...saved },
+        review: { status: 'pending', revision: 0, rounds: [] }, reviewExecution: { state: 'idle', runId: source.runId } } : {}) };
+    assert.equal((review ? h.reviewRecoverySource : h.executionRecoverySource)(current), source);
+    const calls = []; let text = '';
+    const result = await h.dispatchNativeExecution({ task: current, board, snapshot, action: 'start', purpose,
+      workspaceMode: source.workspaceMode, isCurrent: () => true,
+      host: { getSnapshot: () => snapshot, sendMessage: async value => { text = value; } },
+      call: async (name, args) => {
+        calls.push(args);
+        return args.action === 'request' ? { created: true, task: current,
+          request: { ...source, ...args, runId: 'new-run', status: 'pending', recoveryOf: source.requestId } }
+          : { request: { status: 'delivered' } };
+      } });
+    assert.equal(result, 'delivered');
+    assert.ok(text.includes('"recoveryOf":"failed-request"'));
+    assert.ok(text.includes('"threadId":"saved-thread"'));
+    assert.ok(text.includes('"model":"saved-model"'));
+    if (review) {
+      assert.ok(text.includes('Do not call create_thread'));
+      assert.ok(text.includes('phase=created→bound'));
+      assert.ok(!text.includes('Call create_thread once'));
+      assert.ok(!text.includes('Do not wait for creation'));
+      assert.ok(!text.includes('Pass the persisted model unchanged to create_thread'));
+    } else {
+      assert.ok(text.includes('禁止 create_thread'));
+      assert.ok(text.includes('phase=created 和 phase=bound'));
+      assert.ok(!text.includes('本次操作：在当前会话调用一次 create_thread'));
+    }
+  }
 });
 
 test('传输错误/超时为uncertain；发送前上下文改变明确rejected且不发消息', async () => {
   const { call, calls } = callFactory(); let count = 0;
-  const result = await h.dispatchNativeExecution({ task, repo: '/repo', snapshot, host: { getSnapshot: () => snapshot, sendMessage: async () => { count++; throw new Error('timeout'); } }, call, action: 'start', workspaceMode: 'project', isCurrent: () => true });
+  const result = await h.dispatchNativeExecution({ task, board, snapshot, host: { getSnapshot: () => snapshot, sendMessage: async () => { count++; throw new Error('timeout'); } }, call, action: 'start', workspaceMode: 'project', isCurrent: () => true });
   assert.equal(result, 'uncertain'); assert.equal(count, 1); assert.equal(calls.at(-1).args.status, 'uncertain');
   const shifted = callFactory();
-  const rejected = await h.dispatchNativeExecution({ task, repo: '/repo', snapshot, host: { getSnapshot: () => ({ ...snapshot, contextVersion: 2 }), sendMessage: async () => { count++; } }, call: shifted.call, action: 'start', workspaceMode: 'project', isCurrent: () => true });
+  const rejected = await h.dispatchNativeExecution({ task, board, snapshot, host: { getSnapshot: () => ({ ...snapshot, contextVersion: 2 }), sendMessage: async () => { count++; } }, call: shifted.call, action: 'start', workspaceMode: 'project', isCurrent: () => true });
   assert.equal(rejected, 'rejected');
   assert.equal(shifted.calls.at(-1).args.status, 'rejected');
   assert.equal(count, 1);
@@ -341,10 +536,43 @@ test('传输错误/超时为uncertain；发送前上下文改变明确rejected�
   await assert.rejects(h.hostRequest(() => new Promise(() => {}), 5), { code: 'timeout' });
 });
 
+test('请求响应丢失但尚未发送时核对已落盘请求，仅解除本次未认领请求', async () => {
+  for (const scenario of ['pending', 'claimed', 'started', 'reported', 'wrong-run', 'read-failed']) {
+    const calls = []; let requestedId; let messages = 0;
+    const failure = new Error('请求响应丢失');
+    await assert.rejects(h.dispatchNativeExecution({ task, board, snapshot, action: 'start', workspaceMode: 'project',
+      isCurrent: () => true, host: { getSnapshot: () => snapshot, sendMessage: async () => { messages++; } },
+      call: async (name, args) => {
+        calls.push({ name, args });
+        if (name === 'task_execution' && args.action === 'request') { requestedId = args.requestId; throw failure; }
+        if (name === 'task_get') {
+          if (scenario === 'read-failed') throw new Error('无法核对');
+          return { task: { ...task, execution: { state: 'starting', runId: 'saved-run' }, executionRequests: [{
+            requestId: requestedId, runId: scenario === 'wrong-run' ? 'another-run' : 'saved-run', purpose: 'implementation',
+            status: scenario === 'claimed' ? 'claimed' : 'pending',
+            ...(scenario === 'claimed' ? { receiver: { threadId: 'receiver', hostId: 'host' } } : {}),
+            ...(scenario === 'started' ? { startedAt: '2026-10-08T00:00:00.000Z' } : {}),
+            ...(scenario === 'reported' ? { reports: [{ state: 'running' }] } : {}),
+          }] } };
+        }
+        return { request: { status: 'rejected' } };
+      } }), error => error === failure);
+    assert.equal(messages, 0);
+    const deliveries = calls.filter(entry => entry.args.action === 'delivery');
+    assert.equal(deliveries.length, scenario === 'pending' ? 1 : 0, scenario);
+    if (deliveries.length) {
+      assert.equal(deliveries[0].args.status, 'rejected');
+      assert.equal(deliveries[0].args.requestId, requestedId);
+      assert.equal(deliveries[0].args.runId, 'saved-run');
+      assert.ok(deliveries[0].args.error);
+    }
+  }
+});
+
 test('明确拒绝与结果未知分开，迟到拒绝不能断言已认领任务未执行', async () => {
   for (const code of ['rejected', 'unavailable', 'contextChanged', 'transport', 'timeout']) {
     const { call, calls } = callFactory();
-    const outcome = await h.dispatchNativeExecution({ task, repo: '/repo', snapshot,
+    const outcome = await h.dispatchNativeExecution({ task, board, snapshot,
       host: { getSnapshot: () => snapshot, sendMessage: async () => { throw new h.HostOperationError(code); } },
       call, action: 'start', workspaceMode: 'project', isCurrent: () => true });
     const expected = ['rejected', 'unavailable', 'contextChanged'].includes(code) ? 'rejected' : 'uncertain';
@@ -353,9 +581,9 @@ test('明确拒绝与结果未知分开，迟到拒绝不能断言已认领任�
     assert.ok(calls.at(-1).args.error.length > 0);
   }
   const original = callFactory();
-  const outcome = await h.dispatchNativeExecution({ task, repo: '/repo', snapshot,
+  const outcome = await h.dispatchNativeExecution({ task, board, snapshot,
     host: { getSnapshot: () => snapshot, sendMessage: async () => { throw new h.HostOperationError('rejected'); } },
-    call: async (name, args) => name === 'task_execution_delivery' ? { request: { status: 'claimed' } } : original.call(name, args),
+    call: async (name, args) => name === 'task_execution' && args.action === 'delivery' ? { request: { status: 'claimed' } } : original.call(name, args),
     action: 'start', workspaceMode: 'project', isCurrent: () => true });
   assert.equal(outcome, 'uncertain');
 });
@@ -384,16 +612,16 @@ test('blocked 保存真实 created 结果后允许打开和核对继续，禁止
   assert.equal(h.openThreadBlockReason(snapshot, blocked), null);
   assert.equal(h.boundWorkspaceMode(blocked), 'worktree');
   assert.equal(h.creationModelRequest(blocked), request);
-  assert.equal(h.executionBlockReason(snapshot, blocked, '/repo', 'continue', 'worktree'), null);
-  assert.equal(h.executionBlockReason(snapshot, blocked, '/repo', 'continue', 'project'), 'workspace');
-  assert.equal(h.executionBlockReason(snapshot, blocked, '/repo', 'start', 'worktree'), 'blocked');
+  assert.equal(h.executionBlockReason(snapshot, blocked, board, 'continue', 'worktree'), null);
+  assert.equal(h.executionBlockReason(snapshot, blocked, board, 'continue', 'project'), 'workspace');
+  assert.equal(h.executionBlockReason(snapshot, blocked, board, 'start', 'worktree'), 'blocked');
   const unknown = { ...blocked, executionRequests: [{ ...request, result: undefined }] };
-  assert.equal(h.executionBlockReason(snapshot, unknown, '/repo', 'continue', 'worktree'), 'binding');
+  assert.equal(h.executionBlockReason(snapshot, unknown, board, 'continue', 'worktree'), 'binding');
   assert.equal(h.openThreadBlockReason(snapshot, unknown), 'binding');
   assert.equal(h.executionStatus(unknown), 'blocked');
   const temporary = { ...blocked, executionRequests: [{ ...request, result: { ...result, threadId: 'client-new-thread:temporary' } }] };
   assert.equal(h.executionTarget(temporary), undefined);
-  assert.equal(h.executionBlockReason(snapshot, temporary, '/repo', 'continue', 'worktree'), 'binding');
+  assert.equal(h.executionBlockReason(snapshot, temporary, board, 'continue', 'worktree'), 'binding');
   assert.equal(h.openThreadBlockReason(snapshot, temporary), 'binding');
 });
 
@@ -402,11 +630,11 @@ test('blocked 继续提示必须核对原状态与原因，复用真实结果且
   const source = { requestId: 'old', runId: 'old-run', action: 'start', workspaceMode: 'worktree', status: 'blocked', result, model: 'original-model', deliveryError: '工作区核验失败' };
   const blocked = { ...task, execution: { state: 'blocked', runId: 'old-run', activity: '当前缺少权限' }, executionRequests: [source] };
   const calls = []; let text = '';
-  const outcome = await h.dispatchNativeExecution({ task: blocked, repo: '/repo', snapshot,
+  const outcome = await h.dispatchNativeExecution({ task: blocked, board, snapshot,
     host: { getSnapshot: () => snapshot, sendMessage: async value => { text = value; } },
     call: async (name, args) => {
       calls.push({ name, args });
-      if (name === 'task_execution_request') return { task: blocked, created: true,
+      if (name === 'task_execution' && args.action === 'request') return { task: blocked, created: true,
         request: { ...source, ...args, runId: 'new-run', status: 'pending', recoveryOf: 'old' } };
       return { request: { status: 'delivered' } };
     }, action: 'continue', workspaceMode: 'worktree', model: 'replacement-model', isCurrent: () => true });
@@ -415,7 +643,12 @@ test('blocked 继续提示必须核对原状态与原因，复用真实结果且
   assert.ok(text.includes('当前缺少权限'));
   assert.ok(!text.includes('工作区核验失败'));
   assert.ok(text.includes('原 blocked 请求及原因'));
-  assert.ok(text.includes('阻塞条件未解除时必须写回 blocked'));
+  assert.ok(text.includes('阻塞条件未解除且本轮明确无法继续分发'));
+  assert.ok(text.includes('尚无 startedAt/reports'));
+  assert.ok(text.includes('status=rejected 和非空 error'));
+  assert.ok(text.includes('目标已接手执行后的阻塞'));
+  assert.ok(text.includes('已有任何本轮目标回执不得回退'));
+  assert.ok(text.includes('原目标仍活跃或结果不明时保留 uncertain'));
   assert.ok(text.includes('无论是否已有 executionBinding，都必须复用本轮 request.result 按 phase=created→bound'));
   assert.ok(text.includes('旧 executionBinding 不代表本轮已 bound'));
   assert.ok(text.includes('禁止 create_thread、新建工作区、切换工作区或模型'));
@@ -468,7 +701,7 @@ test('重载从只读 live host_info 恢复实际 peer，可直接发送且不�
   assert.equal(live.identity, 'codex');
   assert.equal(h.hostBlockReason(live), null);
   assert.deepEqual(instance.app.calls, [{ name: 'tasklane_host_info', arguments: {} }]);
-  assert.equal(instance.app.info.version, '0.3.14');
+  assert.equal(instance.app.info.version, '0.3.20');
   assert.equal(typeof instance.client.verifyConnection, 'undefined');
   await instance.client.sendMessage('真实任务', live.contextVersion);
   instance.app.ontoolresult({ structuredContent: { ...projectContext, mcpClient: codexPeer } });
@@ -476,6 +709,42 @@ test('重载从只读 live host_info 恢复实际 peer，可直接发送且不�
   assert.ok(!window.name.includes('nativeExecution'));
   assert.ok(!window.name.includes('verificationPending'));
   delete globalThis.__KANBAN_MCP_APPS__;
+});
+
+test('report 卡片 taskId：合法值 trim 保留并写入缓存，非法值丢弃且不影响项目上下文', () => {
+  window.name = '';
+  const instance = installApp();
+  const received = [];
+  instance.client.onWidgetContext = (ctx) => received.push(ctx);
+  instance.app.ontoolresult({ structuredContent: { ...projectContext, taskId: '  TASK-129  ' } });
+  assert.equal(received.length, 1);
+  assert.equal(received[0].taskId, 'TASK-129');
+  assert.ok(window.name.includes('"taskId":"TASK-129"'));
+
+  for (const invalid of ['', '   ', 'x'.repeat(201), 123, null, { id: 'TASK-1' }]) {
+    instance.app.ontoolresult({ structuredContent: { ...projectContext, taskId: invalid } });
+    assert.equal(received[received.length - 1].taskId, undefined, JSON.stringify(invalid));
+    assert.equal(received[received.length - 1].mode, 'project');
+  }
+  // 非法值之后缓存不再携带 taskId（cacheScope 只保留合法值）
+  window.name = '';
+  instance.app.ontoolresult({ structuredContent: { ...projectContext, taskId: '  ' } });
+  assert.ok(!window.name.includes('taskId'));
+
+  // 无 taskId 的普通 open_tasklane 上下文不出现该字段
+  window.name = '';
+  instance.app.ontoolresult({ structuredContent: { ...projectContext } });
+  assert.ok(!window.name.includes('taskId'));
+  delete globalThis.__KANBAN_MCP_APPS__;
+});
+
+test('report 卡片 taskId：iframe 重载从缓存恢复聚焦目标', () => {
+  window.name = `tasklane-ctx:${JSON.stringify({ ...projectContext, taskId: 'TASK-129' })}`;
+  const instance = installApp();
+  assert.equal(instance.client.initialWidgetContext.taskId, 'TASK-129');
+  assert.equal(instance.client.initialWidgetContext.lockedBoardId, 'b');
+  delete globalThis.__KANBAN_MCP_APPS__;
+  window.name = '';
 });
 
 test('非 Codex live peer 和 host_info 读取失败均不因旧缓存获得投递权限', async () => {
